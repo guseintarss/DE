@@ -2,23 +2,20 @@
 #define ICONS_H
 
 #include <wlr/types/wlr_scene.h>
-#include <wlr/render/allocator.h>
-#include <wlr/render/wlr_renderer.h>
+#include <wlr/render/gles2.h>
 #include <cairo/cairo.h>
 #include <fontconfig/fontconfig.h>
 
 /* Контекст для управления иконками */
 struct mywm_icon_manager {
     struct wlr_renderer *renderer;
-    struct wlr_allocator *allocator;
     char *icon_theme;          /* Название темы иконок (например, "Adwaita") */
     int icon_size;             /* Размер иконок по умолчанию */
 };
 
 /* Инициализация менеджера иконок */
 void icon_manager_init(struct mywm_icon_manager *mgr,
-                       struct wlr_renderer *renderer,
-                       struct wlr_allocator *allocator);
+                       struct wlr_renderer *renderer);
 
 /* Завершение работы менеджера иконок */
 void icon_manager_finish(struct mywm_icon_manager *mgr);

@@ -12,13 +12,13 @@ static struct mywm_view *desktop_view_at(struct mywm_server *server,
         double lx, double ly, struct wlr_surface **surface,
         double *sx, double *sy) {
     struct wlr_scene_node *node = wlr_scene_node_at(
-        &server->scene->tree.node, lx, ly, sx, sy);
+        &server->scene->node, lx, ly, sx, sy);
     if (node == NULL || node->type != WLR_SCENE_NODE_BUFFER) {
         return NULL;
     }
     struct wlr_scene_buffer *scene_buffer = wlr_scene_buffer_from_node(node);
     struct wlr_scene_surface *scene_surface =
-        wlr_scene_surface_try_from_buffer(scene_buffer);
+        wlr_scene_surface_from_buffer(scene_buffer);
     if (scene_surface == NULL) {
         return NULL;
     }
