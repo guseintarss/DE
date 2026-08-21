@@ -1,0 +1,532 @@
+#define _GNU_SOURCE
+#include "server.h"
+#include <cairo.h>
+#include <fcntl.h>
+#include <fontconfig/fontconfig.h>
+#include <locale.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
+#include <drm_fourcc.h>
+#include <wayland-server-core.h>
+#include <wlr/interfaces/wlr_buffer.h>
+#include <wlr/types/wlr_buffer.h>
+#include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_scene.h>
+#include <wlr/util/log.h>
+
+/* Верхний менюбар как в macOS: имя приложения + меню слева, системные
+ * иконки и часы справа. Полупрозрачное тёмное «стекло», белый текст. */
+#define BAR_HEIGHT MENU_BAR_HEIGHT
+#define BAR_PAD_X 12
+#define BAR_APP_MAX_W 240
+#define BAR_MENU_GAP 22
+#define BAR_CLOCK_RIGHT 14
+#define BAR_ICON_GAP 8
+#define BAR_FONT_NAME 13
+#define BAR_FONT_CLOCK 12
+#define BAR_TEXT_BASELINE (BAR_HEIGHT - 7)
+#define BAR_ICON_W 16
+#define BAR_ICON_H 14
+
+static const float bar_bg_color[4] = {0.11f, 0.12f, 0.14f, 0.72f};
+static const float bar_line_color[4] = {0.0f, 0.0f, 0.0f, 0.25f};
+static const float bar_text_color[4] = {0.96f, 0.96f, 0.98f, 1.0f};
+static const float bar_icon_color[4] = {0.95f, 0.95f, 0.97f, 0.9f};
+/* Позиции кнопок в баре — те же, что на заголовке окна. */
+#define BAR_BTN_X BTN_X
+#define BAR_BTN_Y ((BAR_HEIGHT - BTN_SIZE) / 2)
+/* Сдвиг имени приложения вправо, когда в баре видны кнопки. */
+#define BAR_BTN_AREA_W (3 * BTN_SIZE + 2 * BTN_GAP)
+
+/*
+ * CPU-буфер под текст: память (memfd), которую рисует cairo и которую
+ * рендерер импортирует как wl_shm-буфер (get_shm / data_ptr_access).
+ */
+struct mywm_text_buf {
+    struct wlr_buffer base;
+    int fd;
+    void *data;
+    size_t size;
+    size_t stride;
+};
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+static void text_buf_destroy(struct wlr_buffer *wb) {
+    struct mywm_text_buf *buf = wl_container_of(wb, buf, base);
+    munmap(buf->data, buf->size);
+    close(buf->fd);
+    free(buf);
+}
+
+static bool text_buf_get_shm(struct wlr_buffer *wb,
+                             struct wlr_shm_attributes *attribs) {
+    struct mywm_text_buf *buf = wl_container_of(wb, buf, base);
+    attribs->fd = buf->fd;
+    attribs->format = DRM_FORMAT_ARGB8888;
+    attribs->width = wb->width;
+    attribs->height = wb->height;
+    attribs->stride = (int)buf->stride;
+    attribs->offset = 0;
+    return true;
+}
+
+static bool text_buf_begin_data_ptr_access(struct wlr_buffer *wb,
+                                           uint32_t flags, void **data,
+                                           uint32_t *format, size_t *stride) {
+    (void)flags;
+    struct mywm_text_buf *buf = wl_container_of(wb, buf, base);
+    *data = buf->data;
+    *format = DRM_FORMAT_ARGB8888;
+    *stride = buf->stride;
+    return true;
+}
+
+static void text_buf_end_data_ptr_access(struct wlr_buffer *wb) {
+    (void)wb;
+}
+
+static const struct wlr_buffer_impl text_buf_impl = {
+    .destroy = text_buf_destroy,
+    .get_shm = text_buf_get_shm,
+    .begin_data_ptr_access = text_buf_begin_data_ptr_access,
+    .end_data_ptr_access = text_buf_end_data_ptr_access,
+};
+
+static struct mywm_text_buf *text_buf_create(int width, int height) {
+    struct mywm_text_buf *buf = calloc(1, sizeof(*buf));
+    if (buf == NULL) {
+        return NULL;
+    }
+    buf->stride = (size_t)width * 4;
+    buf->size = buf->stride * (size_t)height;
+    buf->fd = syscall(SYS_memfd_create, "de-bar", MFD_CLOEXEC);
+    if (buf->fd < 0) {
+        free(buf);
+        return NULL;
+    }
+    if (ftruncate(buf->fd, (off_t)buf->size) != 0) {
+        close(buf->fd);
+        free(buf);
+        return NULL;
+    }
+    buf->data = mmap(NULL, buf->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                     buf->fd, 0);
+    if (buf->data == MAP_FAILED) {
+        close(buf->fd);
+        free(buf);
+        return NULL;
+    }
+    wlr_buffer_init(&buf->base, &text_buf_impl, width, height);
+    return buf;
+}
+
+static double bar_text_width(const char *text, int px,
+                             cairo_font_weight_t weight) {
+    cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+    cairo_t *cr = cairo_create(s);
+    cairo_select_font_face(cr, "SF Pro Display", CAIRO_FONT_SLANT_NORMAL,
+                           weight);
+    cairo_set_font_size(cr, px);
+    cairo_text_extents_t e;
+    cairo_text_extents(cr, text, &e);
+    cairo_destroy(cr);
+    cairo_surface_destroy(s);
+    return e.x_advance;
+}
+
+static void bar_draw(struct mywm_text_buf *buf, const char *text, int px,
+                     cairo_font_weight_t weight) {
+    cairo_surface_t *surf = cairo_image_surface_create_for_data(
+        buf->data, CAIRO_FORMAT_ARGB32, buf->base.width, buf->base.height,
+        (int)buf->stride);
+    cairo_t *cr = cairo_create(surf);
+    cairo_set_source_rgba(cr, bar_text_color[0], bar_text_color[1],
+                          bar_text_color[2], bar_text_color[3]);
+    cairo_select_font_face(cr, "SF Pro Display", CAIRO_FONT_SLANT_NORMAL,
+                           weight);
+    cairo_set_font_size(cr, px);
+    cairo_move_to(cr, 0, BAR_TEXT_BASELINE);
+    cairo_show_text(cr, text);
+    cairo_destroy(cr);
+    cairo_surface_destroy(surf);
+}
+
+/* Заменяет содержимое scene_buffer новым текстом (ширина под текст).
+ * Держим собственный lock на буфер: после загрузки текстуры wlroots
+ * освобождает буфер (scene_buffer->buffer = NULL), а раскладке нужна
+ * ширина текста. */
+static void bar_set_text(struct mywm_server *server,
+                         struct wlr_scene_buffer *sb,
+                         struct mywm_text_buf **slot, const char *text,
+                         int px, cairo_font_weight_t weight) {
+    (void)server;
+    int w = (int)bar_text_width(text, px, weight) + 8;
+    struct mywm_text_buf *nb = text_buf_create(w, BAR_HEIGHT);
+    if (nb == NULL) {
+        return;
+    }
+    bar_draw(nb, text, px, weight);
+    wlr_buffer_lock(&nb->base);
+    wlr_buffer_drop(&nb->base);
+    wlr_scene_buffer_set_buffer(sb, &nb->base);
+    if (*slot != NULL) {
+        wlr_buffer_unlock(&(*slot)->base);
+        *slot = NULL;
+    }
+    *slot = nb;
+}
+
+/* Обрезает заголовок до BAR_APP_MAX_W с многоточием. */
+static void bar_clip_title(const char *title, char *out, size_t out_len) {
+    double w = bar_text_width(title, BAR_FONT_NAME, CAIRO_FONT_WEIGHT_BOLD);
+    if (w <= BAR_APP_MAX_W) {
+        snprintf(out, out_len, "%s", title);
+        return;
+    }
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s", title);
+    while (tmp[0] != '\0') {
+        tmp[strlen(tmp) - 1] = '\0';
+        char ell[320];
+        snprintf(ell, sizeof(ell), "%s…", tmp);
+        if (bar_text_width(ell, BAR_FONT_NAME, CAIRO_FONT_WEIGHT_BOLD) <=
+                BAR_APP_MAX_W) {
+            snprintf(out, out_len, "%s", ell);
+            return;
+        }
+    }
+    snprintf(out, out_len, "…");
+}
+
+static void bar_layout(struct mywm_server *server) {
+    struct mywm_bar *bar = &server->bar;
+    struct wlr_box box;
+    wlr_output_layout_get_box(server->output_layout, NULL, &box);
+    if (box.width <= 0 || box.height <= 0) {
+        return;
+    }
+    wlr_scene_rect_set_size(bar->bg, box.width, BAR_HEIGHT);
+    wlr_scene_rect_set_size(bar->line, box.width, 1);
+    wlr_scene_node_set_position(&bar->line->node, 0, BAR_HEIGHT - 1);
+
+    bool show_btns = server->focused_view != NULL &&
+        server->focused_view->maximized && server->focused_view->mapped;
+    for (int i = 0; i < 3; i++) {
+        wlr_scene_node_set_enabled(&bar->btns[i].node->node, show_btns);
+    }
+    if (show_btns) {
+        wlr_scene_node_set_position(&bar->btns[0].node->node,
+                                    BAR_BTN_X, BAR_BTN_Y);
+        wlr_scene_node_set_position(&bar->btns[1].node->node,
+                                    BAR_BTN_X + BTN_SIZE + BTN_GAP, BAR_BTN_Y);
+        wlr_scene_node_set_position(&bar->btns[2].node->node,
+                                    BAR_BTN_X + 2 * (BTN_SIZE + BTN_GAP),
+                                    BAR_BTN_Y);
+    }
+
+    int menus_w = bar->menus_buf != NULL ? bar->menus_buf->base.width : 0;
+    int left = BAR_PAD_X + (show_btns ? BAR_BTN_AREA_W + BTN_X : 0);
+    /* Меню слева, имя приложения после них. */
+    wlr_scene_node_set_position(&bar->menus->node, left, 0);
+    wlr_scene_node_set_position(&bar->app->node,
+                                left + menus_w + BAR_MENU_GAP, 0);
+    /* Справа (как в macOS): часы у края, затем батарея и WiFi. */
+    int cw = bar->clock_buf != NULL ? bar->clock_buf->base.width : 0;
+    int icon_y = (BAR_HEIGHT - BAR_ICON_H) / 2;
+    int x = box.width - BAR_CLOCK_RIGHT - cw;
+    wlr_scene_node_set_position(&bar->clock->node, x, 0);
+    x -= BAR_ICON_W + BAR_ICON_GAP;
+    wlr_scene_node_set_position(&bar->battery->node, x, icon_y);
+    x -= BAR_ICON_W + BAR_ICON_GAP;
+    wlr_scene_node_set_position(&bar->wifi->node, x, icon_y);
+}
+
+/* Какая кнопка максимизированного окна в менюбаре под точкой. */
+enum mywm_title_button bar_button_at(struct mywm_server *server,
+                                     double lx, double ly) {
+    struct mywm_bar *bar = &server->bar;
+    if (server->focused_view == NULL ||
+        !server->focused_view->maximized ||
+        !server->focused_view->mapped ||
+        !bar->btns[0].node->node.enabled) {
+        return MYWM_BTN_NONE;
+    }
+    double rx = lx - BAR_BTN_X;
+    double ry = ly - BAR_BTN_Y;
+    if (ry < 0 || ry >= BTN_SIZE || rx < 0) {
+        return MYWM_BTN_NONE;
+    }
+    if (rx < BTN_SIZE) {
+        return MYWM_BTN_CLOSE;
+    }
+    if (rx < BTN_SIZE + BTN_GAP) {
+        return MYWM_BTN_NONE;
+    }
+    if (rx < 2 * BTN_SIZE + BTN_GAP) {
+        return MYWM_BTN_MINIMIZE;
+    }
+    if (rx < 2 * BTN_SIZE + 2 * BTN_GAP) {
+        return MYWM_BTN_NONE;
+    }
+    if (rx < 3 * BTN_SIZE + 2 * BTN_GAP) {
+        return MYWM_BTN_MAXIMIZE;
+    }
+    return MYWM_BTN_NONE;
+}
+
+static int bar_clock_tick(void *data) {
+    struct mywm_server *server = data;
+    time_t now = time(NULL);
+    struct tm *tm_now = localtime(&now);
+    char text[48];
+    if (tm_now != NULL) {
+        /* Как в macOS: "чт 20 авг  21:15" (дата + время). */
+        strftime(text, sizeof(text), "%a %e %b  %H:%M", tm_now);
+    } else {
+        snprintf(text, sizeof(text), "--:--");
+    }
+    bar_set_text(server, server->bar.clock, &server->bar.clock_buf,
+                 text, BAR_FONT_CLOCK, CAIRO_FONT_WEIGHT_NORMAL);
+    bar_layout(server);
+    wl_event_source_timer_update(server->bar.clock_timer, 1000);
+    return 0;
+}
+
+/*
+ * Круглая кнопка как в macOS: закрашенный круг размером `size` и,
+ * если glyph != NONE, тёмный глиф поверх (×, −, ◤◢). Возвращает буфер
+ * с собственным lock (не освобождается сценой после загрузки текстуры).
+ */
+struct mywm_text_buf *mywm_button_buf(int size, const float color[4],
+                                      enum mywm_title_button glyph) {
+    struct mywm_text_buf *buf = text_buf_create(size, size);
+    if (buf == NULL) {
+        return NULL;
+    }
+    cairo_surface_t *surf = cairo_image_surface_create_for_data(
+        buf->data, CAIRO_FORMAT_ARGB32, size, size, (int)buf->stride);
+    cairo_t *cr = cairo_create(surf);
+    double c = size / 2.0;
+
+    cairo_set_source_rgba(cr, color[0], color[1], color[2], color[3]);
+    cairo_arc(cr, c, c, c - 0.5, 0, 2 * M_PI);
+    cairo_fill(cr);
+
+    if (glyph != MYWM_BTN_NONE) {
+        cairo_set_source_rgba(cr, 0.30f, 0.22f, 0.18f, 0.55f);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+        cairo_set_line_width(cr, 1.3);
+        switch (glyph) {
+        case MYWM_BTN_CLOSE:
+            cairo_move_to(cr, c - 2.2, c - 2.2);
+            cairo_line_to(cr, c + 2.2, c + 2.2);
+            cairo_move_to(cr, c + 2.2, c - 2.2);
+            cairo_line_to(cr, c - 2.2, c + 2.2);
+            cairo_stroke(cr);
+            break;
+        case MYWM_BTN_MINIMIZE:
+            cairo_move_to(cr, c - 2.4, c);
+            cairo_line_to(cr, c + 2.4, c);
+            cairo_stroke(cr);
+            break;
+        case MYWM_BTN_MAXIMIZE:
+            cairo_move_to(cr, c - 0.8, c - 3.0);
+            cairo_line_to(cr, c - 3.0, c - 0.8);
+            cairo_line_to(cr, c - 3.0, c - 3.0);
+            cairo_close_path(cr);
+            cairo_fill(cr);
+            cairo_move_to(cr, c + 0.8, c + 3.0);
+            cairo_line_to(cr, c + 3.0, c + 0.8);
+            cairo_line_to(cr, c + 3.0, c + 3.0);
+            cairo_close_path(cr);
+            cairo_fill(cr);
+            break;
+        default:
+            break;
+        }
+    }
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surf);
+    wlr_buffer_lock(&buf->base);
+    wlr_buffer_drop(&buf->base);
+    return buf;
+}
+
+/* Полный набор кнопки: узел + обычный круг и глиф (на hover). */
+struct mywm_btn mywm_btn_create(struct wlr_scene_tree *parent, int size,
+                                const float color[4],
+                                enum mywm_title_button glyph_btn) {
+    struct mywm_btn b = {
+        .plain = mywm_button_buf(size, color, MYWM_BTN_NONE),
+        .glyph = mywm_button_buf(size, color, glyph_btn),
+    };
+    b.node = wlr_scene_buffer_create(parent, NULL);
+    if (b.plain != NULL) {
+        wlr_scene_buffer_set_buffer(b.node, &b.plain->base);
+    }
+    return b;
+}
+
+/* Показывает глиф (hover) или обычный круг. */
+void mywm_button_hover(struct mywm_btn *btn, bool hovered) {
+    if (btn == NULL || btn->plain == NULL || btn->glyph == NULL) {
+        return;
+    }
+    struct wlr_buffer *target =
+        hovered ? &btn->glyph->base : &btn->plain->base;
+    if (btn->node->buffer != target) {
+        wlr_scene_buffer_set_buffer(btn->node, target);
+    }
+}
+
+static void bar_round_rect(cairo_t *cr, double x, double y, double w,
+                           double h, double r) {
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, x + r, y + r, r, M_PI, 1.5 * M_PI);
+    cairo_arc(cr, x + w - r, y + r, r, 1.5 * M_PI, 2 * M_PI);
+    cairo_arc(cr, x + w - r, y + h - r, r, 0, 0.5 * M_PI);
+    cairo_arc(cr, x + r, y + h - r, r, 0.5 * M_PI, M_PI);
+    cairo_close_path(cr);
+}
+
+/* Иконки статуса как в macOS: WiFi (дуги) и батарея (контур + заливка). */
+static struct mywm_text_buf *bar_icon_wifi(void) {
+    struct mywm_text_buf *buf = text_buf_create(BAR_ICON_W, BAR_ICON_H);
+    if (buf == NULL) {
+        return NULL;
+    }
+    cairo_surface_t *surf = cairo_image_surface_create_for_data(
+        buf->data, CAIRO_FORMAT_ARGB32, BAR_ICON_W, BAR_ICON_H,
+        (int)buf->stride);
+    cairo_t *cr = cairo_create(surf);
+    cairo_set_source_rgba(cr, bar_icon_color[0], bar_icon_color[1],
+                          bar_icon_color[2], bar_icon_color[3]);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_width(cr, 1.3);
+    double cx = 8.0, cy = 10.0;
+    for (double r = 2.0; r <= 4.8; r += 1.4) {
+        cairo_arc(cr, cx, cy, r, M_PI * 1.15, M_PI * 1.85);
+        cairo_stroke(cr);
+    }
+    cairo_arc(cr, cx, cy, 0.9, 0, 2 * M_PI);
+    cairo_fill(cr);
+    cairo_destroy(cr);
+    cairo_surface_destroy(surf);
+    wlr_buffer_lock(&buf->base);
+    wlr_buffer_drop(&buf->base);
+    return buf;
+}
+
+static struct mywm_text_buf *bar_icon_battery(void) {
+    struct mywm_text_buf *buf = text_buf_create(BAR_ICON_W, BAR_ICON_H);
+    if (buf == NULL) {
+        return NULL;
+    }
+    cairo_surface_t *surf = cairo_image_surface_create_for_data(
+        buf->data, CAIRO_FORMAT_ARGB32, BAR_ICON_W, BAR_ICON_H,
+        (int)buf->stride);
+    cairo_t *cr = cairo_create(surf);
+    cairo_set_source_rgba(cr, bar_icon_color[0], bar_icon_color[1],
+                          bar_icon_color[2], bar_icon_color[3]);
+    cairo_set_line_width(cr, 1.2);
+    /* Корпус с закруглением и «носик» справа. */
+    double x = 1.5, y = 4.5, w = 12.0, h = 6.0;
+    bar_round_rect(cr, x, y, w, h, 1.5);
+    cairo_stroke(cr);
+    bar_round_rect(cr, x + w + 0.5, y + 1.5, 2.0, h - 3.0, 0.8);
+    cairo_fill(cr);
+    /* Заряд ~65%. */
+    bar_round_rect(cr, x + 1.5, y + 1.5, w * 0.65 - 1.5, h - 3.0, 1.0);
+    cairo_fill(cr);
+    cairo_destroy(cr);
+    cairo_surface_destroy(surf);
+    wlr_buffer_lock(&buf->base);
+    wlr_buffer_drop(&buf->base);
+    return buf;
+}
+
+/* Обновляет имя активного приложения в менюбаре. */
+void bar_update_name(struct mywm_server *server) {
+    struct mywm_view *focused = server->focused_view;
+    const char *title = "Рабочий стол";
+    if (focused != NULL && focused->xdg_toplevel != NULL &&
+        focused->xdg_toplevel->title != NULL &&
+        focused->xdg_toplevel->title[0] != '\0') {
+        title = focused->xdg_toplevel->title;
+    }
+    char clipped[320];
+    bar_clip_title(title, clipped, sizeof(clipped));
+    bar_set_text(server, server->bar.app, &server->bar.app_buf,
+                 clipped, BAR_FONT_NAME, CAIRO_FONT_WEIGHT_BOLD);
+    bar_layout(server);
+}
+
+/* Менюбар всегда поверх окон (как в macOS). */
+void bar_raise(struct mywm_server *server) {
+    wlr_scene_node_raise_to_top(&server->bar.tree->node);
+}
+
+void bar_init(struct mywm_server *server) {
+    server->bar.server = server;
+    server->bar.tree = wlr_scene_tree_create(&server->scene->tree);
+    server->bar.bg = wlr_scene_rect_create(server->bar.tree, 0, 0,
+                                           bar_bg_color);
+    server->bar.line = wlr_scene_rect_create(server->bar.tree, 0, 1,
+                                             bar_line_color);
+    server->bar.app = wlr_scene_buffer_create(server->bar.tree, NULL);
+    server->bar.menus = wlr_scene_buffer_create(server->bar.tree, NULL);
+    server->bar.clock = wlr_scene_buffer_create(server->bar.tree, NULL);
+
+    /* Круглые кнопки максимизированного окна (как на заголовке). */
+    static const float btn_colors[3][4] = {
+        {1.0f, 0.37f, 0.34f, 1.0f},
+        {1.0f, 0.74f, 0.18f, 1.0f},
+        {0.16f, 0.78f, 0.25f, 1.0f},
+    };
+    for (int i = 0; i < 3; i++) {
+        server->bar.btns[i] = mywm_btn_create(
+            server->bar.tree, BTN_SIZE, btn_colors[i],
+            (enum mywm_title_button)(i + 1));
+        wlr_scene_node_set_enabled(&server->bar.btns[i].node->node, false);
+    }
+
+    bar_set_text(server, server->bar.menus, &server->bar.menus_buf,
+                 "Файл  Правка  Вид  Окно  Справка", BAR_FONT_NAME,
+                 CAIRO_FONT_WEIGHT_NORMAL);
+
+    /* Иконки статуса (как в macOS): WiFi и батарея справа. */
+    server->bar.wifi_buf = bar_icon_wifi();
+    server->bar.battery_buf = bar_icon_battery();
+    server->bar.wifi = wlr_scene_buffer_create(server->bar.tree, NULL);
+    server->bar.battery = wlr_scene_buffer_create(server->bar.tree, NULL);
+    if (server->bar.wifi_buf != NULL) {
+        wlr_scene_buffer_set_buffer(server->bar.wifi,
+                                    &server->bar.wifi_buf->base);
+    }
+    if (server->bar.battery_buf != NULL) {
+        wlr_scene_buffer_set_buffer(server->bar.battery,
+                                    &server->bar.battery_buf->base);
+    }
+    setlocale(LC_TIME, "");
+
+    /* SF Pro Display из папки проекта. */
+    FcConfigAppFontAddDir(
+        FcConfigGetCurrent(),
+        "/home/temir/Проекты/Code/DE/fonts/San Francisco Pro Display");
+
+    struct wl_event_loop *loop =
+        wl_display_get_event_loop(server->wl_display);
+    server->bar.clock_timer =
+        wl_event_loop_add_timer(loop, bar_clock_tick, server);
+    wl_event_source_timer_update(server->bar.clock_timer, 1);
+
+    bar_update_name(server);
+}

@@ -1,0 +1,55 @@
+# Конфигурация MyWM (Этап 4).
+# Пути поиска: $DE_CONFIG -> $XDG_CONFIG_HOME/de/config.toml
+#              -> ~/.config/de/config.toml -> config.toml (текущий каталог).
+# Если файл не найден — используются встроенные значения по умолчанию.
+
+# Раскладка XKB (правила evdev, модель pc105).
+layout = "us"
+
+# --- Этап 5: обои ---
+# path — файл изображения (PNG/JPEG/BMP/GIF/TGA); пусто — встроенные
+#        обои из assets/wallpaper.png.
+# mode — cover (заполнить с обрезкой, по умолчанию) | stretch | fit | tile
+[wallpaper]
+path = ""
+mode = "cover"
+
+# --- Этап 5: анимации ---
+# enabled     — spring-анимации открытия/закрытия (macOS-стиль).
+# stiffness   — жёсткость пружины (170 по умолчанию).
+# damping     — затухание (26 по умолчанию, ~критическое).
+# open_slide  — сдвиг вниз при открытии (px).
+# close_slide — сдвиг вверх при закрытии (px).
+[animations]
+enabled = true
+stiffness = 170.0
+damping = 26.0
+open_slide = 14
+close_slide = 12
+
+# Горячие клавиши: "<модификаторы>+<keysym>" = действие.
+# Модификаторы: super, shift, ctrl, alt.
+# Действия:
+#   "команда"        — запуск приложения через fork/execvp (без шелла)
+#   "@close"         — закрыть сфокусированное окно
+#   "@exit"          — выйти из композитора
+#   "@cycle"         — переключить фокус между окнами
+#   "@lock [команда]"— запустить экранный блокировщик
+#   "@move <dir>"    — переместить окно (up/down/left/right)
+#   "@resize <dir>"  — изменить размер окна (up/down/left/right)
+[bindings]
+"super+Return" = "alacritty"
+"super+Shift+q" = "@close"
+"super+Shift+e" = "@exit"
+"super+l" = "@lock swaylock"
+"super+Tab" = "@cycle"
+"alt+Tab" = "@cycle"
+"alt+F4" = "@close"
+"super+Left" = "@move left"
+"super+Right" = "@move right"
+"super+Up" = "@move up"
+"super+Down" = "@move down"
+"super+Shift+Left" = "@resize left"
+"super+Shift+Right" = "@resize right"
+"super+Shift+Up" = "@resize up"
+"super+Shift+Down" = "@resize down"
