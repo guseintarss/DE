@@ -5,25 +5,30 @@
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
 
-#define DOCK_ICON 44
-#define DOCK_MAG_EXTRA 18
-#define DOCK_MAG_SIGMA 30.0
-#define DOCK_GAP 8
-#define DOCK_PADDING 10
-#define DOCK_HEIGHT (DOCK_ICON + 2 * DOCK_PADDING)
-#define DOCK_SEP_WIDTH 2
-#define DOCK_DOT_W 8
-#define DOCK_DOT_H 4
-#define DOCK_DOT_Y (DOCK_HEIGHT - DOCK_PADDING + 2)
-#define DOCK_ANIM_MS 8
-#define DOCK_ANIM_SPEED 0.3
+/* macOS-style Dock Configuration */
+#define DOCK_ICON 48
+#define DOCK_MAG_EXTRA 24          /* Увеличенное увеличение как в macOS */
+#define DOCK_MAG_SIGMA 35.0        /* Более широкое распространение волны */
+#define DOCK_GAP 6                 /* Меньший зазор между иконками */
+#define DOCK_PADDING 8             /* Меньшие отступы */
+#define DOCK_HEIGHT (DOCK_ICON + 2 * DOCK_PADDING + 8)
+#define DOCK_SEP_WIDTH 1           /* Тонкий разделитель */
+#define DOCK_DOT_W 6
+#define DOCK_DOT_H 6
+#define DOCK_DOT_RADIUS 3
+#define DOCK_DOT_Y (DOCK_HEIGHT - DOCK_PADDING + 4)
+#define DOCK_ANIM_MS 16            /* Плавная анимация ~60fps */
+#define DOCK_ANIM_SPEED 0.25       /* Более плавное затухание */
+#define DOCK_CORNER_RADIUS 12      /* Закругление панели дока */
 
-static const float dock_bar_color[4] = {0.09f, 0.10f, 0.13f, 0.85f};
-static const float dock_icon_color[4] = {0.35f, 0.40f, 0.50f, 1.0f};
-static const float dock_icon_active[4] = {0.42f, 0.55f, 0.75f, 1.0f};
-static const float dock_icon_minimized[4] = {0.20f, 0.22f, 0.28f, 1.0f};
-static const float dock_sep_color[4] = {0.60f, 0.62f, 0.68f, 0.40f};
-static const float dock_dot_color[4] = {0.04f, 0.04f, 0.06f, 1.0f};
+/* macOS-inspired color palette (Space Gray theme) */
+static const float dock_bar_color[4] = {0.12f, 0.12f, 0.14f, 0.75f};  /* Полупрозрачный тёмный */
+static const float dock_icon_color[4] = {0.50f, 0.52f, 0.56f, 0.95f};  /* Светло-серый неактивный */
+static const float dock_icon_active[4] = {1.00f, 1.00f, 1.00f, 1.00f};  /* Белый активный */
+static const float dock_icon_minimized[4] = {0.35f, 0.36f, 0.40f, 0.85f}; /* Приглушённый для свёрнутых */
+static const float dock_sep_color[4] = {0.50f, 0.50f, 0.52f, 0.35f};   /* Еле заметный разделитель */
+static const float dock_dot_color[4] = {1.00f, 1.00f, 1.00f, 0.90f};   /* Белый индикатор */
+static const float dock_glow_color[4] = {0.40f, 0.60f, 1.00f, 0.15f};  /* Голубое свечение */
 
 static void dock_layout(struct mywm_server *server);
 
