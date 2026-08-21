@@ -29,7 +29,7 @@ static void output_frame_handler(struct wl_listener *listener, void *data) {
 
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    wlr_scene_output_commit(output->scene_output, NULL);
+    wlr_scene_output_commit(output->scene_output);
     wlr_scene_output_send_frame_done(output->scene_output, &now);
 }
 
@@ -61,17 +61,11 @@ static void server_new_output(struct wl_listener *listener, void *data) {
     struct mywm_server *server = wl_container_of(listener, server, new_output);
     struct wlr_output *wlr_output = data;
 
-    struct wlr_output_state state;
-    wlr_output_state_init(&state);
-    wlr_output_state_set_enabled(&state, true);
-
     struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
     if (mode != NULL) {
-        wlr_output_state_set_mode(&state, mode);
+        wlr_output_set_mode(wlr_output, mode);
     }
-
-    wlr_output_commit_state(wlr_output, &state);
-    wlr_output_state_finish(&state);
+    wlr_output_commit(wlr_output);
 
     struct mywm_output *output = calloc(1, sizeof(struct mywm_output));
     if (output == NULL) {
@@ -89,18 +83,18 @@ static void server_new_output(struct wl_listener *listener, void *data) {
     }
 
     /* Субдерево обоев: самый нижний слой (ниже всех окон). */
-    output->bg_tree = wlr_scene_tree_create(&server->scene->tree);
+    output->bg_tree = wlr_scene_tree_create(&server->scene->node);
     wlr_scene_node_lower_to_bottom(&output->bg_tree->node);
 
     struct wlr_scene_node *background_node;
     if (server->wallpaper != NULL) {
         output->background = wlr_scene_buffer_create(
-                output->bg_tree, server->wallpaper->buffer);
+                &output->bg_tree->node, server->wallpaper->buffer);
         background_node = &output->background->node;
     } else {
         float bg_color[4] = {0.08f, 0.09f, 0.16f, 1.0f};
         output->background_fallback = wlr_scene_rect_create(
-                output->bg_tree,
+                &output->bg_tree->node,
                 wlr_output->width, wlr_output->height,
                 bg_color);
         background_node = &output->background_fallback->node;
@@ -200,16 +194,15 @@ void server_init(struct mywm_server *server) {
     wlr_log_init(WLR_DEBUG, NULL);
 
     server->wl_display = wl_display_create();
-    server->backend = wlr_backend_autocreate(
-        wl_display_get_event_loop(server->wl_display), NULL);
+    server->backend = wlr_backend_autocreate(server->wl_display);
     server->renderer = wlr_renderer_autocreate(server->backend);
     wlr_renderer_init_wl_display(server->renderer, server->wl_display);
 
     add_headless_outputs(server);
 
     server->allocator = wlr_allocator_autocreate(server->backend, server->renderer);
-    server->compositor = wlr_compositor_create(server->wl_display, 6, server->renderer);
-    server->output_layout = wlr_output_layout_create(server->wl_display);
+    server->compositor = wlr_compositor_create(server->wl_display, server->renderer);
+    server->output_layout = wlr_output_layout_create();
     server->scene = wlr_scene_create();
 
     server->xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);

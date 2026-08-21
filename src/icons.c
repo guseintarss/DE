@@ -6,7 +6,7 @@
 #include <dirent.h>
 #include <cairo/cairo.h>
 #include <wlr/types/wlr_scene.h>
-#include <wlr/render.h>
+#include <wlr/render/wlr_renderer.h>
 #include <wlr/util/log.h>
 
 /* Стандартные пути для иконок в Linux */

@@ -2,7 +2,7 @@
 #define ICONS_H
 
 #include <wlr/types/wlr_scene.h>
-#include <wlr/render/wlr_renderer.h>
+#include <wlr/render/gles2.h>
 #include <cairo/cairo.h>
 #include <fontconfig/fontconfig.h>
 
