@@ -6,6 +6,12 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 
+/* Цвета декораций */
+static const float deco_border_color[4] = {0.15f, 0.15f, 0.15f, 1.0f};
+static const float deco_body_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+static const float deco_title_unfocused[4] = {0.92f, 0.92f, 0.92f, 1.0f};
+static const float deco_title_focused[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+
 /*
  * Размеры хрома привязаны к размеру содержимого окна (view->width/height),
  * который приходит от клиента в commit. Текстура пересоздаётся только при

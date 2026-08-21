@@ -226,7 +226,7 @@ void server_init(struct mywm_server *server) {
     animations_init(server);
 
     /* Инициализация менеджера иконок */
-    icon_manager_init(&server->icon_mgr, server->renderer, server->allocator);
+    icon_manager_init(&server->icon_mgr, server->renderer);
 
     wl_list_init(&server->outputs);
     wl_list_init(&server->views);

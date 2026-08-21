@@ -9,7 +9,7 @@
 #include <time.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
-#include <wlr/render/wlr_renderer.h>
+#include <wlr/render.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_xdg_shell.h>
@@ -101,6 +101,8 @@ struct mywm_bar {
     struct mywm_text_buf *wifi_buf;
     struct mywm_text_buf *battery_buf;
     struct wl_event_source *clock_timer;
+    /* Кнопки управления в баре: 0=CLOSE, 1=MINIMIZE, 2=MAXIMIZE. */
+    struct mywm_btn btns[3];
 };
 
 struct mywm_server {
@@ -213,6 +215,10 @@ struct mywm_view {
     /* Контейнер декораций (рамка + заголовок). scene_tree — его ребёнок,
      * поэтому move/focus/raise двигают всё окно вместе. */
     struct wlr_scene_tree *deco_tree;
+    /* Декорации: граница, тело окна, заголовок. */
+    struct wlr_scene_rect *deco_border;
+    struct wlr_scene_rect *deco_body;
+    struct wlr_scene_rect *deco_title;
     /* Хром окна: одна CPU-текстура со скруглёнными углами (effects.c).
      * chrome_buf — собственный lock буфера; chrome_w/h — размер текстуры. */
     struct wlr_scene_buffer *chrome;
@@ -330,8 +336,7 @@ void dock_raise(struct mywm_server *server);
 
 /* --- icons.c --- */
 void icon_manager_init(struct mywm_icon_manager *mgr,
-                       struct wlr_renderer *renderer,
-                       struct wlr_allocator *allocator);
+                       struct wlr_renderer *renderer);
 void icon_manager_finish(struct mywm_icon_manager *mgr);
 struct wlr_scene_buffer *icon_load_app(struct mywm_icon_manager *mgr,
                                         struct wlr_scene_tree *parent,

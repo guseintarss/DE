@@ -6,9 +6,7 @@
 #include <dirent.h>
 #include <cairo/cairo.h>
 #include <wlr/types/wlr_scene.h>
-#include <wlr/render/allocator.h>
-#include <wlr/render/renderer.h>
-#include <wlr/render/swapchain.h>
+#include <wlr/render.h>
 #include <wlr/util/log.h>
 
 /* Стандартные пути для иконок в Linux */
@@ -29,12 +27,10 @@ static const char *default_themes[] = {
 };
 
 void icon_manager_init(struct mywm_icon_manager *mgr,
-                       struct wlr_renderer *renderer,
-                       struct wlr_allocator *allocator) {
+                       struct wlr_renderer *renderer) {
     if (!mgr) return;
     
     mgr->renderer = renderer;
-    mgr->allocator = allocator;
     mgr->icon_size = 48;
     
     /* Определяем тему по умолчанию */
@@ -199,27 +195,25 @@ static struct wlr_scene_buffer *create_texture_from_cairo(
         return NULL;
     }
     
-    /* Создаем wlr_buffer из данных */
-    struct wlr_buffer *wlr_buf = wlr_buffer_alloc(width, height);
-    if (!wlr_buf) {
+    /* Создаем текстуру напрямую через wlr_texture_from_pixels */
+    struct wlr_texture *texture = wlr_texture_from_pixels(
+        mgr->renderer, WL_SHM_FORMAT_ARGB8888, 
+        cairo_image_surface_get_stride(surface),
+        width, height, data);
+    
+    if (!texture) {
         return NULL;
     }
     
-    /* Копируем данные пикселей */
-    struct wlr_client_buffer *client_buf = wlr_client_buffer_create(
-        wlr_buf, mgr->renderer);
-    
-    if (!client_buf) {
-        wlr_buffer_drop(wlr_buf);
-        return NULL;
-    }
-    
-    /* Создаём scene_buffer */
-    struct wlr_scene_buffer *scene_buf = wlr_scene_buffer_create(parent, client_buf);
+    /* Создаём scene_buffer с текстурой */
+    struct wlr_scene_buffer *scene_buf = wlr_scene_buffer_create(parent, NULL);
     if (!scene_buf) {
-        wlr_buffer_drop(wlr_buf);
+        wlr_texture_destroy(texture);
         return NULL;
     }
+    
+    /* Устанавливаем текстуру в buffer */
+    wlr_scene_buffer_set_texture(scene_buf, texture);
     
     /* Устанавливаем размер */
     wlr_scene_buffer_set_dest_size(scene_buf, size, size);
