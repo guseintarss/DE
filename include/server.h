@@ -5,6 +5,7 @@
 #include "config.h"
 #include "effects.h"
 #include "wallpaper.h"
+#include "icons.h"
 #include <time.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
@@ -59,7 +60,8 @@ struct mywm_btn {
 struct mywm_dock_item {
     struct wl_list link;
     struct mywm_view *view;
-    struct wlr_scene_rect *icon;
+    struct wlr_scene_rect *icon;      /* Прямоугольник (fallback) */
+    struct wlr_scene_buffer *icon_img; /* Текстура с иконкой приложения */
     /* Текущая (анимированная) и целевая геометрия в координатах
      * output layout. */
     double cw, ch, tw, th;
@@ -113,6 +115,9 @@ struct mywm_server {
     struct wlr_scene *scene;
 
     struct mywm_wallpaper *wallpaper;
+
+    /* Менеджер иконок приложений */
+    struct mywm_icon_manager icon_mgr;
 
     /* Конфигурация этапа 5 ([wallpaper]/[animations] в config.toml). */
     struct wallpaper_config wallpaper_cfg;
@@ -322,6 +327,27 @@ void dock_update(struct mywm_server *server);
 struct mywm_view *dock_icon_at(struct mywm_server *server,
                                double lx, double ly);
 void dock_raise(struct mywm_server *server);
+
+/* --- icons.c --- */
+void icon_manager_init(struct mywm_icon_manager *mgr,
+                       struct wlr_renderer *renderer,
+                       struct wlr_allocator *allocator);
+void icon_manager_finish(struct mywm_icon_manager *mgr);
+struct wlr_scene_buffer *icon_load_app(struct mywm_icon_manager *mgr,
+                                        struct wlr_scene_tree *parent,
+                                        const char *app_id,
+                                        int size);
+struct wlr_scene_buffer *icon_load_from_gnome_cache(
+    struct mywm_icon_manager *mgr,
+    struct wlr_scene_tree *parent,
+    const char *icon_name,
+    int size);
+struct wlr_scene_buffer *icon_create_fallback(struct mywm_icon_manager *mgr,
+                                               struct wlr_scene_tree *parent,
+                                               int size,
+                                               const float color[4]);
+char **icon_get_available_themes(void);
+void icon_theme_list_free(char **themes);
 
 /* --- bar.c --- */
 void bar_init(struct mywm_server *server);

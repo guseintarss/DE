@@ -225,6 +225,9 @@ void server_init(struct mywm_server *server) {
     server->wallpaper = wallpaper_load_auto(server);
     animations_init(server);
 
+    /* Инициализация менеджера иконок */
+    icon_manager_init(&server->icon_mgr, server->renderer, server->allocator);
+
     wl_list_init(&server->outputs);
     wl_list_init(&server->views);
     wl_list_init(&server->keyboards);
@@ -279,6 +282,7 @@ void server_run(struct mywm_server *server) {
 void server_finish(struct mywm_server *server) {
     animations_finish(server);
     wallpaper_destroy(server->wallpaper);
+    icon_manager_finish(&server->icon_mgr);
     config_finish(server);
     xkb_context_unref(server->xkb_context);
     wl_display_destroy_clients(server->wl_display);
