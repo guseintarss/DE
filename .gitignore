@@ -4,27 +4,23 @@ build/
 dist/
 *.o
 *.obj
-*.so
 *.a
+*.so
 *.dll
 *.exe
 *.out
 
 # Dependencies
-.venv/
-venv/
-node_modules/
+.submodule/
+.external/
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Logs and temp files
-*.log
+# Temp files
 *.tmp
 *.swp
+*.swo
+
+# Logs
+*.log
 
 # Editors
 .vscode/
@@ -34,13 +30,4 @@ __pycache__/
 .env
 .env.local
 *.env.*
-
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
-# OS
-.DS_Store
-Thumbs.db
 ```

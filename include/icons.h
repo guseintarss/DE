@@ -3,7 +3,7 @@
 
 #include <wlr/types/wlr_scene.h>
 #include <wlr/render/allocator.h>
-#include <wlr/render/renderer.h>
+#include <wlr/render/wlr_renderer.h>
 #include <cairo/cairo.h>
 #include <fontconfig/fontconfig.h>
 

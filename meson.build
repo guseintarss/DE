@@ -4,10 +4,21 @@ project('DE', 'c',
 
 add_project_arguments('-DWLR_USE_UNSTABLE', language: 'c')
 
+wayland_scanner = find_program('wayland-scanner')
+wayland_protocols_dir = dependency('wayland-protocols').get_variable('pkgdatadir')
+
+xdg_shell_proto = custom_target('xdg-shell-proto',
+  input: wayland_protocols_dir + '/stable/xdg-shell/xdg-shell.xml',
+  output: 'xdg-shell-protocol.h',
+  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@']
+)
+
+inc = include_directories('include', 'third_party/tomlc99', '.')
+
 deps = [
   dependency('wayland-server'),
   dependency('wayland-protocols'),
-  dependency('wlroots-0.20', version: '>=0.16.0'),
+  dependency('wlroots'),
   dependency('xkbcommon'),
   dependency('pixman-1'),
   dependency('libdrm'),
@@ -35,6 +46,7 @@ executable('DE',
   'src/icons.c',
   'third_party/tomlc99/toml.c',
   wallpaper_data,
-  include_directories: include_directories('include', 'third_party/tomlc99'),
+  xdg_shell_proto,
+  include_directories: inc,
   dependencies: deps,
   install: true)
