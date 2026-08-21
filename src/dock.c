@@ -172,16 +172,29 @@ static void dock_layout(struct mywm_server *server) {
         }
         it->lx = bar_x + x;
         it->ly = bar_y + DOCK_PADDING + DOCK_ICON - it->lh;
-        wlr_scene_rect_set_size(it->icon, it->lw, it->lh);
-        wlr_scene_node_set_position(&it->icon->node, x,
-                                    DOCK_PADDING + DOCK_ICON - it->lh);
-        const float *color = dock_icon_color;
-        if (v == server->focused_view) {
-            color = dock_icon_active;
-        } else if (is_min) {
-            color = dock_icon_minimized;
+        
+        /* Показываем иконку приложения вместо прямоугольника */
+        if (it->icon_img) {
+            wlr_scene_node_set_enabled(&it->icon_img->node, true);
+            wlr_scene_buffer_set_dest_size(it->icon_img, it->lw, it->lh);
+            wlr_scene_node_set_position(&it->icon_img->node, x,
+                                        DOCK_PADDING + DOCK_ICON - it->lh);
+            /* Прячем fallback прямоугольник */
+            wlr_scene_node_set_enabled(&it->icon->node, false);
+        } else {
+            /* Если нет текстуры иконки, показываем fallback */
+            wlr_scene_rect_set_size(it->icon, it->lw, it->lh);
+            wlr_scene_node_set_position(&it->icon->node, x,
+                                        DOCK_PADDING + DOCK_ICON - it->lh);
+            const float *color = dock_icon_color;
+            if (v == server->focused_view) {
+                color = dock_icon_active;
+            } else if (is_min) {
+                color = dock_icon_minimized;
+            }
+            wlr_scene_rect_set_color(it->icon, color);
+            wlr_scene_node_set_enabled(&it->icon->node, true);
         }
-        wlr_scene_rect_set_color(it->icon, color);
         x += it->lw + DOCK_GAP;
     }
 
@@ -253,8 +266,49 @@ void dock_add_view(struct mywm_server *server, struct mywm_view *view) {
         return;
     }
     item->view = view;
+    
+    /* Создаём fallback прямоугольник (будет скрыт если есть иконка) */
     item->icon = wlr_scene_rect_create(server->dock.tree, DOCK_ICON,
                                        DOCK_ICON, dock_icon_color);
+    wlr_scene_node_set_enabled(&item->icon->node, false);
+    
+    /* Пытаемся загрузить иконку приложения по app_id */
+    const char *app_id = NULL;
+    if (view->xdg_toplevel && view->xdg_toplevel->base) {
+        app_id = view->xdg_toplevel->app_id;
+    }
+    
+    if (app_id != NULL && strlen(app_id) > 0) {
+        item->icon_img = icon_load_app(&server->icon_mgr, server->dock.tree,
+                                        app_id, DOCK_ICON);
+    }
+    
+    /* Если иконка не загрузилась, создаём цветной fallback */
+    if (item->icon_img == NULL) {
+        static const float fallback_colors[][4] = {
+            {0.2f, 0.6f, 1.0f, 0.9f},
+            {1.0f, 0.4f, 0.2f, 0.9f},
+            {0.2f, 0.8f, 0.4f, 0.9f},
+            {0.8f, 0.2f, 0.6f, 0.9f},
+        };
+        unsigned hash = 0;
+        if (app_id) {
+            for (const char *p = app_id; *p; p++) {
+                hash = hash * 31 + (unsigned)*p;
+            }
+        }
+        item->icon_img = icon_create_fallback(&server->icon_mgr, 
+                                              server->dock.tree,
+                                              DOCK_ICON,
+                                              fallback_colors[hash % 4]);
+    }
+    
+    /* Скрываем иконку по умолчанию, показываем только в layout */
+    if (item->icon_img) {
+        wlr_scene_node_set_enabled(&item->icon_img->node, false);
+        wlr_scene_buffer_set_dest_size(item->icon_img, DOCK_ICON, DOCK_ICON);
+    }
+    
     item->cw = item->ch = item->tw = item->th = DOCK_ICON;
     wl_list_insert(&server->dock.items, &item->link);
     dock_refresh(server);
@@ -267,6 +321,9 @@ void dock_remove_view(struct mywm_server *server, struct mywm_view *view) {
             continue;
         }
         wlr_scene_node_destroy(&it->icon->node);
+        if (it->icon_img) {
+            wlr_scene_node_destroy(&it->icon_img->node);
+        }
         wl_list_remove(&it->link);
         free(it);
         break;
