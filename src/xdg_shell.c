@@ -376,6 +376,12 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
                                              deco_title_unfocused);
     wlr_scene_node_set_position(&view->deco_title->node, DECO_BORDER, 0);
 
+    /* Хром окна: одна CPU-текстура со скруглёнными углами поверх rect'ов
+     * (эффекты.c). Нода создаётся пустой — текстуру зальёт
+     * effects_chrome_regen по первому commit клиента. Кнопки и содержимое
+     * создаются ниже, т.е. рендерятся поверх хрома. */
+    view->chrome = wlr_scene_buffer_create(view->deco_tree, NULL);
+
     /* Кнопки управления слева в заголовке (красная/жёлтая/зелёная),
      * круглые как в macOS, с глифами при наведении. */
     static const float btn_colors[3][4] = {

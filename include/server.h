@@ -359,6 +359,9 @@ void icon_theme_list_free(char **themes);
 void bar_init(struct mywm_server *server);
 void bar_update_name(struct mywm_server *server);
 void bar_raise(struct mywm_server *server);
+/* Какая кнопка максимизированного окна в менюбаре под точкой. */
+enum mywm_title_button bar_button_at(struct mywm_server *server,
+                                     double lx, double ly);
 /* Круглая кнопка: буфер с закрашенным кругом и (опционально) глифом. */
 struct mywm_text_buf *mywm_button_buf(int size, const float color[4],
                                       enum mywm_title_button glyph);

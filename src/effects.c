@@ -167,7 +167,7 @@ static void chrome_draw(struct mywm_chrome_buf *cb, double radius,
  * финализация (effects_tform_finalize) пересоздаст хром сама.
  */
 void effects_chrome_regen(struct mywm_view *view) {
-    if (view->tform_active) {
+    if (view->tform_active || view->chrome == NULL) {
         return;
     }
     int cw = view->width + 2 * DECO_BORDER;
@@ -187,7 +187,7 @@ void effects_chrome_regen(struct mywm_view *view) {
         border[i] = chrome_border_color[i] +
             (chrome_border_hover[i] - chrome_border_color[i]) * t;
     }
-    chrome_draw(nb, view->server->animations_cfg.corner_radius,
+    chrome_draw(nb, EFFECTS_CORNER_RADIUS,
                 border, title, chrome_body_color);
 
     wlr_buffer_lock(&nb->base);
@@ -271,7 +271,7 @@ void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind) {
                 break;
             }
         }
-        double s = server->animations_cfg.genie_scale;
+        double s = EFFECTS_GENIE_SCALE;
         b = (struct tform_geo){
             .x = cx - view->chrome_w * s / 2.0,
             .y = cy - view->chrome_h * s / 2.0,
@@ -279,7 +279,7 @@ void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind) {
             .ch = view->chrome_h * s,
             .w = view->width * s,
             .h = view->height * s,
-            .op = server->animations_cfg.genie_opacity,
+            .op = EFFECTS_GENIE_OPACITY,
         };
         view->tform_home = a;
         break;
@@ -300,8 +300,8 @@ void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind) {
         view->tform_min_geo = b;
         wlr_scene_node_set_enabled(&view->deco_tree->node, true);
     }
-    spring_init(&view->tform_spr, server->animations_cfg.transform_stiffness,
-                server->animations_cfg.transform_damping);
+    spring_init(&view->tform_spr, EFFECTS_TFORM_STIFFNESS,
+                EFFECTS_TFORM_DAMPING);
     view->tform_spr.current = 0.0;
     spring_set_target(&view->tform_spr, 1.0);
     view->tform_active = true;
@@ -328,11 +328,13 @@ void effects_tform_apply(struct mywm_view *view) {
 
     double x = a->x + (b->x - a->x) * p;
     double y = a->y + (b->y - a->y) * p;
-    double cw = a->cw + (b->cw - a->cw) * p;
-    double ch = a->ch + (b->ch - a->ch) * p;
-    double w = a->w + (b->w - a->w) * p;
-    double h = a->h + (b->h - a->h) * p;
-    double op = a->op + (b->op - a->op) * p;
+    /* Клампим: пружина при рывке dt может перекинуть цель — а wlroots
+     * ассертит opacity в [0,1] и dest_size >= 0 (SIGABRT иначе). */
+    double cw = fmax(1.0, a->cw + (b->cw - a->cw) * p);
+    double ch = fmax(1.0, a->ch + (b->ch - a->ch) * p);
+    double w = fmax(1.0, a->w + (b->w - a->w) * p);
+    double h = fmax(1.0, a->h + (b->h - a->h) * p);
+    double op = fmin(1.0, fmax(0.0, a->op + (b->op - a->op) * p));
 
     wlr_scene_node_set_position(&view->deco_tree->node, x, y);
     wlr_scene_buffer_set_dest_size(view->chrome,
