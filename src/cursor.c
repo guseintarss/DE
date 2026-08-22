@@ -16,14 +16,14 @@ static struct mywm_view *desktop_view_at(struct mywm_server *server,
     if (node == NULL || node->type != WLR_SCENE_NODE_BUFFER) {
         return NULL;
     }
-    struct wlr_scene_buffer *scene_buffer = wlr_scene_buffer_from_node(node);
+    struct wlr_scene_buffer *scene_buffer = (struct wlr_scene_buffer *)node;
     struct wlr_scene_surface *scene_surface =
         wlr_scene_surface_from_buffer(scene_buffer);
     if (scene_surface == NULL) {
         return NULL;
     }
     *surface = scene_surface->surface;
-    struct wlr_scene_tree *tree = node->parent;
+    struct wlr_scene_tree *tree = ((struct wlr_scene_node *)scene_buffer)->parent;
     while (tree != NULL && tree->node.data == NULL) {
         tree = tree->node.parent;
     }
@@ -145,23 +145,22 @@ void reset_cursor_mode(struct mywm_server *server) {
  */
 void clamp_view_to_layout(struct mywm_server *server, struct mywm_view *view,
                           int *x, int *y) {
-    struct wlr_box layout_box;
-    wlr_output_layout_get_box(server->output_layout, NULL, &layout_box);
-    if (wlr_box_empty(&layout_box)) {
+    struct wlr_box *layout_box = wlr_output_layout_get_box(server->output_layout, NULL);
+    if (layout_box == NULL || wlr_box_empty(layout_box)) {
         return;
     }
     const int margin = 20;
-    int min_x = layout_box.x - view->width - 2 * DECO_BORDER + margin;
-    int min_y = layout_box.y - view->height - DECO_TITLE -
+    int min_x = layout_box->x - view->width - 2 * DECO_BORDER + margin;
+    int min_y = layout_box->y - view->height - DECO_TITLE -
         2 * DECO_BORDER + margin;
-    int max_x = layout_box.x + layout_box.width - margin;
-    int max_y = layout_box.y + layout_box.height - margin;
+    int max_x = layout_box->x + layout_box->width - margin;
+    int max_y = layout_box->y + layout_box->height - margin;
     /* Окно шире/выше layout: прижимаем левый/верхний край к началу layout. */
     if (min_x > max_x) {
-        min_x = max_x = layout_box.x;
+        min_x = max_x = layout_box->x;
     }
     if (min_y > max_y) {
-        min_y = max_y = layout_box.y;
+        min_y = max_y = layout_box->y;
     }
     if (*x < min_x) {
         *x = min_x;
@@ -233,13 +232,13 @@ static void process_cursor_resize(struct mywm_server *server) {
         }
     }
 
-    struct wlr_box *geo_box = &view->xdg_toplevel->base->geometry;
+    struct wlr_box *geo_box = &view->xdg_toplevel->base->current.geometry;
     int new_x = new_left - DECO_BORDER - geo_box->x;
     int new_y = new_top - DECO_TITLE - DECO_BORDER - geo_box->y;
     effects_view_set_position(view, new_x, new_y);
     view->x = new_x;
     view->y = new_y;
-    wlr_xdg_toplevel_set_size(view->xdg_toplevel,
+    wlr_xdg_toplevel_set_size(view->xdg_toplevel->base,
                               new_right - new_left, new_bottom - new_top);
     wlr_log(WLR_DEBUG, "cursor resize: view=%p size=%dx%d",
             (void *)view, new_right - new_left, new_bottom - new_top);
@@ -320,7 +319,7 @@ static void server_cursor_motion(struct wl_listener *listener, void *data) {
     if (event == NULL) {
         return;
     }
-    wlr_cursor_move(server->cursor, &event->pointer->base,
+    wlr_cursor_move(server->cursor, event->pointer,
                     event->delta_x, event->delta_y);
     process_cursor_motion(server, event->time_msec);
 }
@@ -332,7 +331,7 @@ static void server_cursor_motion_absolute(struct wl_listener *listener, void *da
     if (event == NULL) {
         return;
     }
-    wlr_cursor_warp_absolute(server->cursor, &event->pointer->base,
+    wlr_cursor_warp_absolute(server->cursor, event->pointer,
                              event->x, event->y);
     process_cursor_motion(server, event->time_msec);
 }
@@ -353,15 +352,19 @@ void begin_interactive(struct mywm_view *view,
     if (mode == MYWM_CURSOR_MOVE) {
         /* Захват относительно внешнего края окна (декораций): точка нажатия
          * остаётся под курсором, окно не прыгает (как в Windows/macOS). */
-        server->grab_x = server->cursor->x - view->deco_tree->node.x;
-        server->grab_y = server->cursor->y - view->deco_tree->node.y;
+        int deco_x, deco_y;
+        wlr_scene_node_coords(&view->deco_tree->node, &deco_x, &deco_y);
+        server->grab_x = server->cursor->x - deco_x;
+        server->grab_y = server->cursor->y - deco_y;
     } else {
-        struct wlr_box *geo_box = &view->xdg_toplevel->base->geometry;
+        struct wlr_box *geo_box = &view->xdg_toplevel->base->current.geometry;
         /* Содержимое окна в координатах layout: deco_tree позиционируется
          * в layout напрямую, scene_tree — его ребёнок со сдвигом
          * (DECO_BORDER, DECO_TITLE). */
-        double content_x = view->deco_tree->node.x + DECO_BORDER + geo_box->x;
-        double content_y = view->deco_tree->node.y + DECO_TITLE + geo_box->y;
+        int deco_x, deco_y;
+        wlr_scene_node_coords(&view->deco_tree->node, &deco_x, &deco_y);
+        double content_x = deco_x + DECO_BORDER + geo_box->x;
+        double content_y = deco_y + DECO_TITLE + geo_box->y;
         double border_x = content_x +
             ((edges & WLR_EDGE_RIGHT) ? geo_box->width : 0);
         double border_y = content_y +
@@ -493,8 +496,7 @@ static void server_cursor_axis(struct wl_listener *listener, void *data) {
     }
     wlr_seat_pointer_notify_axis(server->seat, event->time_msec,
                                  event->orientation, event->delta,
-                                 event->delta_discrete, event->source,
-                                 event->relative_direction);
+                                 event->delta_discrete);
 }
 
 static void server_cursor_frame(struct wl_listener *listener, void *data) {

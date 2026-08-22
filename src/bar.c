@@ -520,7 +520,7 @@ void bar_init(struct mywm_server *server) {
     /* SF Pro Display из папки проекта. */
     FcConfigAppFontAddDir(
         FcConfigGetCurrent(),
-        "/home/temir/Проекты/Code/DE/fonts/San Francisco Pro Display");
+        (const FcChar8 *)"/home/temir/Проекты/Code/DE/fonts/San Francisco Pro Display");
 
     struct wl_event_loop *loop =
         wl_display_get_event_loop(server->wl_display);

@@ -1,0 +1,35 @@
+# Пример D-Bus интерфейса для C++ ядра
+# Этот XML файл описывает методы, которые PySide6 UI может вызывать
+
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+                      "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node name="/com/myde/WindowManager">
+  <interface name="com.myde.WindowManager">
+    
+    <!-- Запуск приложения -->
+    <method name="LaunchApp">
+      <arg name="app_name" type="s" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+    
+    <!-- Переключение рабочего стола -->
+    <method name="SwitchWorkspace">
+      <arg name="id" type="i" direction="in"/>
+    </method>
+    
+    <!-- Показать все окна (Exposé) -->
+    <method name="ShowAllWindows">
+    </method>
+    
+    <!-- Сигнал об изменении списка окон -->
+    <signal name="WindowListChanged">
+      <arg name="window_ids" type="ai"/>
+    </signal>
+    
+    <!-- Сигнал об активном рабочем столе -->
+    <signal name="WorkspaceChanged">
+      <arg name="workspace_id" type="i"/>
+    </signal>
+    
+  </interface>
+</node>
