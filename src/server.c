@@ -156,18 +156,22 @@ static void server_new_virtual_keyboard(struct wl_listener *listener, void *data
     struct mywm_server *server =
         wl_container_of(listener, server, new_virtual_keyboard);
     struct wlr_virtual_keyboard_v1 *vk = data;
-    server_new_keyboard(server, &vk->keyboard);
-    update_seat_caps(server);
+    struct wlr_input_device *kb_device = wlr_virtual_keyboard_v1_get_input_device(vk);
+    if (kb_device) {
+        server_new_keyboard(server, wlr_keyboard_from_input_device(kb_device));
+        update_seat_caps(server);
+    }
 }
 
 static void server_new_virtual_pointer(struct wl_listener *listener, void *data) {
     struct mywm_server *server =
         wl_container_of(listener, server, new_virtual_pointer);
     struct wlr_virtual_pointer_v1_new_pointer_event *event = data;
-    /* wlr_pointer, встроенный в виртуальный указатель, несёт свой
-     * wlr_input_device (pointer.base) — пускаем его по общему пути. */
-    server_new_pointer(server, &event->new_pointer->pointer.base);
-    update_seat_caps(server);
+    struct wlr_input_device *ptr_device = wlr_virtual_pointer_v1_get_input_device(event->new_pointer);
+    if (ptr_device) {
+        server_new_pointer(server, ptr_device);
+        update_seat_caps(server);
+    }
 }
 
 static void find_headless_backend(struct wlr_backend *backend, void *data) {
