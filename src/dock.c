@@ -5,30 +5,23 @@
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
 
-/* macOS-style Dock Configuration */
-#define DOCK_ICON 48
+/* macOS-style Dock Configuration.
+ * Размер иконки/отступы/зазор — в server->design ([design] config.toml). */
 #define DOCK_MAG_EXTRA 24          /* Увеличенное увеличение как в macOS */
 #define DOCK_MAG_SIGMA 35.0        /* Более широкое распространение волны */
-#define DOCK_GAP 6                 /* Меньший зазор между иконками */
-#define DOCK_PADDING 8             /* Меньшие отступы */
-#define DOCK_HEIGHT (DOCK_ICON + 2 * DOCK_PADDING + 8)
 #define DOCK_SEP_WIDTH 1           /* Тонкий разделитель */
 #define DOCK_DOT_W 6
 #define DOCK_DOT_H 6
 #define DOCK_DOT_RADIUS 3
-#define DOCK_DOT_Y (DOCK_HEIGHT - DOCK_PADDING + 4)
 #define DOCK_ANIM_MS 16            /* Плавная анимация ~60fps */
 #define DOCK_ANIM_SPEED 0.25       /* Более плавное затухание */
-#define DOCK_CORNER_RADIUS 12      /* Закругление панели дока */
 
-/* macOS-inspired color palette (Space Gray theme) */
-static const float dock_bar_color[4] = {0.12f, 0.12f, 0.14f, 0.75f};  /* Полупрозрачный тёмный */
-static const float dock_icon_color[4] = {0.50f, 0.52f, 0.56f, 0.95f};  /* Светло-серый неактивный */
-static const float dock_icon_active[4] = {1.00f, 1.00f, 1.00f, 1.00f};  /* Белый активный */
-static const float dock_icon_minimized[4] = {0.35f, 0.36f, 0.40f, 0.85f}; /* Приглушённый для свёрнутых */
-static const float dock_sep_color[4] = {0.50f, 0.50f, 0.52f, 0.35f};   /* Еле заметный разделитель */
-static const float dock_dot_color[4] = {1.00f, 1.00f, 1.00f, 0.90f};   /* Белый индикатор */
-static const float dock_glow_color[4] = {0.40f, 0.60f, 1.00f, 0.15f};  /* Голубое свечение */
+static int dock_height(const struct mywm_server *server) {
+    return server->design.dock_icon + 2 * server->design.dock_pad + 8;
+}
+static int dock_dot_y(const struct mywm_server *server) {
+    return dock_height(server) - server->design.dock_pad + 4;
+}
 
 static void dock_layout(struct mywm_server *server);
 
@@ -39,6 +32,7 @@ static void dock_layout(struct mywm_server *server);
 static void dock_sizes(struct mywm_server *server) {
     struct mywm_dock *dock = &server->dock;
     struct mywm_dock_item *it;
+    const int icon = server->design.dock_icon;
 
     struct mywm_view *hv = dock_icon_at(server, server->cursor->x,
                                         server->cursor->y);
@@ -65,8 +59,8 @@ static void dock_sizes(struct mywm_server *server) {
             mag = DOCK_MAG_EXTRA *
                 exp(-(dx * dx) / (2.0 * DOCK_MAG_SIGMA * DOCK_MAG_SIGMA));
         }
-        it->tw = DOCK_ICON + mag;
-        it->th = DOCK_ICON + mag;
+        it->tw = icon + mag;
+        it->th = icon + mag;
     }
 }
 
@@ -136,27 +130,28 @@ static void dock_layout(struct mywm_server *server) {
     }
 
     /* Проход 2: разметка (окна | разделитель | свёрнутые), по центру. */
+    const struct design_config *d = &server->design;
     int total = 0;
     wl_list_for_each(it, &dock->items, link) {
         if (!it->view->mapped && !it->view->minimized) {
             continue;
         }
-        total += it->lw + DOCK_GAP;
+        total += it->lw + d->dock_gap;
     }
-    total -= DOCK_GAP;
+    total -= d->dock_gap;
     bool has_sep = napps > 0 && nmin > 0;
     if (has_sep) {
-        total += DOCK_SEP_WIDTH + 2 * DOCK_GAP;
+        total += DOCK_SEP_WIDTH + 2 * d->dock_gap;
     }
 
-    int bar_x = box.x + (box.width - total - 2 * DOCK_PADDING) / 2;
-    int bar_y = box.y + box.height - DOCK_HEIGHT;
+    int bh = dock_height(server);
+    int bar_x = box.x + (box.width - total - 2 * d->dock_pad) / 2;
+    int bar_y = box.y + box.height - bh;
     wlr_scene_node_set_position(&dock->tree->node, bar_x, bar_y);
-    wlr_scene_rect_set_size(dock->bar, total + 2 * DOCK_PADDING,
-                            DOCK_HEIGHT);
+    wlr_scene_rect_set_size(dock->bar, total + 2 * d->dock_pad, bh);
 
     wlr_scene_node_set_enabled(&dock->sep->node, has_sep);
-    int x = DOCK_PADDING;
+    int x = d->dock_pad;
     bool passed_sep = (napps == 0);
     wl_list_for_each(it, &dock->items, link) {
         struct mywm_view *v = it->view;
@@ -165,37 +160,38 @@ static void dock_layout(struct mywm_server *server) {
         }
         bool is_min = v->minimized;
         if (!passed_sep && is_min) {
-            wlr_scene_rect_set_size(dock->sep, DOCK_SEP_WIDTH, DOCK_ICON);
-            wlr_scene_node_set_position(&dock->sep->node, x, DOCK_PADDING);
-            x += DOCK_SEP_WIDTH + DOCK_GAP;
+            wlr_scene_rect_set_size(dock->sep, DOCK_SEP_WIDTH,
+                                    d->dock_icon);
+            wlr_scene_node_set_position(&dock->sep->node, x, d->dock_pad);
+            x += DOCK_SEP_WIDTH + d->dock_gap;
             passed_sep = true;
         }
         it->lx = bar_x + x;
-        it->ly = bar_y + DOCK_PADDING + DOCK_ICON - it->lh;
-        
+        it->ly = bar_y + d->dock_pad + d->dock_icon - it->lh;
+
         /* Показываем иконку приложения вместо прямоугольника */
         if (it->icon_img) {
             wlr_scene_node_set_enabled(&it->icon_img->node, true);
             wlr_scene_buffer_set_dest_size(it->icon_img, it->lw, it->lh);
             wlr_scene_node_set_position(&it->icon_img->node, x,
-                                        DOCK_PADDING + DOCK_ICON - it->lh);
+                                        d->dock_pad + d->dock_icon - it->lh);
             /* Прячем fallback прямоугольник */
             wlr_scene_node_set_enabled(&it->icon->node, false);
         } else {
             /* Если нет текстуры иконки, показываем fallback */
             wlr_scene_rect_set_size(it->icon, it->lw, it->lh);
             wlr_scene_node_set_position(&it->icon->node, x,
-                                        DOCK_PADDING + DOCK_ICON - it->lh);
-            const float *color = dock_icon_color;
+                                        d->dock_pad + d->dock_icon - it->lh);
+            const float *color = d->dock_idle;
             if (v == server->focused_view) {
-                color = dock_icon_active;
+                color = d->dock_active;
             } else if (is_min) {
-                color = dock_icon_minimized;
+                color = d->dock_minimized;
             }
             wlr_scene_rect_set_color(it->icon, color);
             wlr_scene_node_set_enabled(&it->icon->node, true);
         }
-        x += it->lw + DOCK_GAP;
+        x += it->lw + d->dock_gap;
     }
 
     /* Точка под иконкой активного приложения. */
@@ -215,7 +211,7 @@ static void dock_layout(struct mywm_server *server) {
         wlr_scene_node_set_position(&dock->dot->node,
                                     active->lx - bar_x +
                                         (active->lw - DOCK_DOT_W) / 2,
-                                    DOCK_DOT_Y);
+                                    dock_dot_y(server));
     }
 }
 
@@ -241,16 +237,17 @@ void dock_refresh(struct mywm_server *server) {
 
 void dock_init(struct mywm_server *server) {
     server->dock.server = server;
+    const struct design_config *d = &server->design;
     server->dock.tree = wlr_scene_tree_create(&server->scene->tree);
     server->dock.bar = wlr_scene_rect_create(server->dock.tree, 0, 0,
-                                             dock_bar_color);
+                                             d->dock_bg);
     server->dock.sep = wlr_scene_rect_create(server->dock.tree,
-                                             DOCK_SEP_WIDTH, DOCK_ICON,
-                                             dock_sep_color);
+                                             DOCK_SEP_WIDTH, d->dock_icon,
+                                             d->dock_sep);
     wlr_scene_node_set_enabled(&server->dock.sep->node, false);
     server->dock.dot = wlr_scene_rect_create(server->dock.tree,
                                              DOCK_DOT_W, DOCK_DOT_H,
-                                             dock_dot_color);
+                                             d->dock_dot);
     wlr_scene_node_set_enabled(&server->dock.dot->node, false);
     wl_list_init(&server->dock.items);
     struct wl_event_loop *loop =
@@ -266,21 +263,22 @@ void dock_add_view(struct mywm_server *server, struct mywm_view *view) {
         return;
     }
     item->view = view;
-    
+    const struct design_config *d = &server->design;
+
     /* Создаём fallback прямоугольник (будет скрыт если есть иконка) */
-    item->icon = wlr_scene_rect_create(server->dock.tree, DOCK_ICON,
-                                       DOCK_ICON, dock_icon_color);
+    item->icon = wlr_scene_rect_create(server->dock.tree, d->dock_icon,
+                                       d->dock_icon, d->dock_idle);
     wlr_scene_node_set_enabled(&item->icon->node, false);
-    
+
     /* Пытаемся загрузить иконку приложения по app_id */
     const char *app_id = NULL;
     if (view->xdg_toplevel && view->xdg_toplevel->base) {
         app_id = view->xdg_toplevel->app_id;
     }
-    
+
     if (app_id != NULL && strlen(app_id) > 0) {
         item->icon_img = icon_load_app(&server->icon_mgr, server->dock.tree,
-                                        app_id, DOCK_ICON);
+                                        app_id, d->dock_icon);
     }
     
     /* Если иконка не загрузилась, создаём цветной fallback */
@@ -297,19 +295,20 @@ void dock_add_view(struct mywm_server *server, struct mywm_view *view) {
                 hash = hash * 31 + (unsigned)*p;
             }
         }
-        item->icon_img = icon_create_fallback(&server->icon_mgr, 
+        item->icon_img = icon_create_fallback(&server->icon_mgr,
                                               server->dock.tree,
-                                              DOCK_ICON,
+                                              d->dock_icon,
                                               fallback_colors[hash % 4]);
     }
-    
+
     /* Скрываем иконку по умолчанию, показываем только в layout */
     if (item->icon_img) {
         wlr_scene_node_set_enabled(&item->icon_img->node, false);
-        wlr_scene_buffer_set_dest_size(item->icon_img, DOCK_ICON, DOCK_ICON);
+        wlr_scene_buffer_set_dest_size(item->icon_img, d->dock_icon,
+                                       d->dock_icon);
     }
-    
-    item->cw = item->ch = item->tw = item->th = DOCK_ICON;
+
+    item->cw = item->ch = item->tw = item->th = d->dock_icon;
     wl_list_insert(&server->dock.items, &item->link);
     dock_refresh(server);
 }
@@ -353,4 +352,17 @@ struct mywm_view *dock_icon_at(struct mywm_server *server,
 
 void dock_raise(struct mywm_server *server) {
     wlr_scene_node_raise_to_top(&server->dock.tree->node);
+}
+/* Повторное применение [design] к доку (SIGHUP): цвета панели,
+ * разделителя и точки; размеры применит dock_layout. */
+void dock_redesign(struct mywm_server *server) {
+    struct mywm_dock *dock = &server->dock;
+    if (dock->tree == NULL) {
+        return;
+    }
+    const struct design_config *d = &server->design;
+    wlr_scene_rect_set_color(dock->bar, d->dock_bg);
+    wlr_scene_rect_set_color(dock->sep, d->dock_sep);
+    wlr_scene_rect_set_color(dock->dot, d->dock_dot);
+    dock_refresh(server);
 }

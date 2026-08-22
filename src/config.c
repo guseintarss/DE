@@ -222,6 +222,226 @@ void config_anim_defaults(struct mywm_server *server) {
     server->animations_cfg.close_slide = EFFECTS_CLOSE_SLIDE;
 }
 
+/* --- [design]: единый источник цветов и метрик оболочки --- */
+
+static void design_defaults(struct design_config *d) {
+    memset(d, 0, sizeof(*d));
+    d->font = strdup("SF Pro Display");
+
+    d->border = 4;
+    d->title_h = 28;
+    d->btn_size = 11;
+    d->btn_gap = 6;
+    d->menu_bar_h = 26;
+
+    d->dock_icon = 48;
+    d->dock_pad = 8;
+    d->dock_gap = 6;
+
+    /* Окно (хром + rect-фолбэки). */
+    float border[4] = {0.02f, 0.02f, 0.05f, 1.0f};
+    float body[4] = {0.13f, 0.15f, 0.19f, 1.0f};
+    float title_f[4] = {0.42f, 0.55f, 0.75f, 1.0f};
+    float title_u[4] = {0.30f, 0.34f, 0.42f, 1.0f};
+    float hover[4] = {0.35f, 0.45f, 0.65f, 1.0f};
+    memcpy(d->window_border, border, sizeof(border));
+    memcpy(d->window_body, body, sizeof(body));
+    memcpy(d->title_focused, title_f, sizeof(title_f));
+    memcpy(d->title_unfocused, title_u, sizeof(title_u));
+    memcpy(d->border_hover, hover, sizeof(hover));
+
+    /* Кнопки управления (macOS traffic lights). */
+    float btn_c[4] = {1.0f, 0.37f, 0.34f, 1.0f};
+    float btn_m[4] = {1.0f, 0.74f, 0.18f, 1.0f};
+    float btn_x[4] = {0.16f, 0.78f, 0.25f, 1.0f};
+    memcpy(d->btn_close, btn_c, sizeof(btn_c));
+    memcpy(d->btn_minimize, btn_m, sizeof(btn_m));
+    memcpy(d->btn_maximize, btn_x, sizeof(btn_x));
+
+    /* Менюбар: полупрозрачное тёмное «стекло», белый текст. */
+    float bar_bg[4] = {0.11f, 0.12f, 0.14f, 0.72f};
+    float bar_line[4] = {0.0f, 0.0f, 0.0f, 0.25f};
+    float bar_text[4] = {0.96f, 0.96f, 0.98f, 1.0f};
+    float bar_icon[4] = {0.95f, 0.95f, 0.97f, 0.9f};
+    memcpy(d->bar_bg, bar_bg, sizeof(bar_bg));
+    memcpy(d->bar_line, bar_line, sizeof(bar_line));
+    memcpy(d->bar_text, bar_text, sizeof(bar_text));
+    memcpy(d->bar_icon, bar_icon, sizeof(bar_icon));
+
+    /* Док (Space Gray). */
+    float dock_bg[4] = {0.12f, 0.12f, 0.14f, 0.75f};
+    float dock_idle[4] = {0.50f, 0.52f, 0.56f, 0.95f};
+    float dock_act[4] = {1.00f, 1.00f, 1.00f, 1.00f};
+    float dock_min[4] = {0.35f, 0.36f, 0.40f, 0.85f};
+    float dock_sep[4] = {0.50f, 0.50f, 0.52f, 0.35f};
+    float dock_dot[4] = {1.00f, 1.00f, 1.00f, 0.90f};
+    memcpy(d->dock_bg, dock_bg, sizeof(dock_bg));
+    memcpy(d->dock_idle, dock_idle, sizeof(dock_idle));
+    memcpy(d->dock_active, dock_act, sizeof(dock_act));
+    memcpy(d->dock_minimized, dock_min, sizeof(dock_min));
+    memcpy(d->dock_sep, dock_sep, sizeof(dock_sep));
+    memcpy(d->dock_dot, dock_dot, sizeof(dock_dot));
+}
+
+void config_design_defaults(struct mywm_server *server) {
+    design_defaults(&server->design);
+}
+
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/* "#RRGGBB" или "#RRGGBBAA" -> прямые RGBA [0..1]. */
+static bool parse_hex_color(const char *s, float out[4]) {
+    if (s == NULL || s[0] != '#') {
+        return false;
+    }
+    size_t len = strlen(s);
+    if (len != 7 && len != 9) {
+        return false;
+    }
+    for (size_t i = 1; i < len; i++) {
+        if (hex_digit(s[i]) < 0) {
+            return false;
+        }
+    }
+    for (int ch = 0; ch < 4; ch++) {
+        if (len == 7 && ch == 3) {
+            out[ch] = 1.0f;   /* альфа не задана — непрозрачно */
+            break;
+        }
+        int hi = hex_digit(s[1 + ch * 2]);
+        int lo = hex_digit(s[2 + ch * 2]);
+        out[ch] = (float)(hi * 16 + lo) / 255.0f;
+    }
+    return true;
+}
+
+static void parse_color_key(toml_table_t *tab, const char *key, float out[4]) {
+    toml_datum_t v = toml_string_in(tab, key);
+    if (!v.ok) {
+        return;
+    }
+    float parsed[4];
+    if (parse_hex_color(v.u.s, parsed)) {
+        memcpy(out, parsed, sizeof(parsed));
+    } else {
+        wlr_log(WLR_ERROR, "config: [design].%s: ожидается #RRGGBB[AA], "
+                "получено '%s'", key, v.u.s);
+    }
+    free(v.u.s);
+}
+
+static void parse_design_table(struct design_config *d, toml_table_t *tab) {
+    toml_datum_t font = toml_string_in(tab, "font");
+    if (font.ok) {
+        free(d->font);
+        d->font = strdup(font.u.s);
+        free(font.u.s);
+    }
+
+    struct { const char *key; int *val; } ints[] = {
+        {"border", &d->border},
+        {"title_height", &d->title_h},
+        {"button_size", &d->btn_size},
+        {"button_gap", &d->btn_gap},
+        {"menu_bar_height", &d->menu_bar_h},
+        {"dock_icon", &d->dock_icon},
+        {"dock_padding", &d->dock_pad},
+        {"dock_gap", &d->dock_gap},
+    };
+    for (size_t i = 0; i < sizeof(ints) / sizeof(ints[0]); i++) {
+        toml_datum_t v = toml_int_in(tab, ints[i].key);
+        if (v.ok && v.u.i > 0 && v.u.i <= 512) {
+            *ints[i].val = (int)v.u.i;
+        } else if (v.ok) {
+            wlr_log(WLR_ERROR, "config: [design].%s: %ld вне диапазона 1..512",
+                    ints[i].key, (long)v.u.i);
+        }
+    }
+
+    parse_color_key(tab, "color_window_border", d->window_border);
+    parse_color_key(tab, "color_window_body", d->window_body);
+    parse_color_key(tab, "color_title_focused", d->title_focused);
+    parse_color_key(tab, "color_title_unfocused", d->title_unfocused);
+    parse_color_key(tab, "color_border_hover", d->border_hover);
+    parse_color_key(tab, "color_btn_close", d->btn_close);
+    parse_color_key(tab, "color_btn_minimize", d->btn_minimize);
+    parse_color_key(tab, "color_btn_maximize", d->btn_maximize);
+    parse_color_key(tab, "color_bar_bg", d->bar_bg);
+    parse_color_key(tab, "color_bar_line", d->bar_line);
+    parse_color_key(tab, "color_bar_text", d->bar_text);
+    parse_color_key(tab, "color_bar_icon", d->bar_icon);
+    parse_color_key(tab, "color_dock_bg", d->dock_bg);
+    parse_color_key(tab, "color_dock_idle", d->dock_idle);
+    parse_color_key(tab, "color_dock_active", d->dock_active);
+    parse_color_key(tab, "color_dock_minimized", d->dock_minimized);
+    parse_color_key(tab, "color_dock_sep", d->dock_sep);
+    parse_color_key(tab, "color_dock_dot", d->dock_dot);
+
+    wlr_log(WLR_INFO, "config: design font='%s' border=%d title=%d btn=%d/%d "
+            "menubar=%d dock=%d/%d/%d",
+            d->font, d->border, d->title_h, d->btn_size, d->btn_gap,
+            d->menu_bar_h, d->dock_icon, d->dock_pad, d->dock_gap);
+}
+
+/*
+ * Повторное чтение только [design] из того же файла, что и при старте
+ * (авто-поиск). Применять результат будет design_apply (design.c).
+ */
+bool config_design_reload(struct mywm_server *server) {
+    char path[1024];
+    const char *env = getenv("DE_CONFIG");
+    if (env != NULL) {
+        snprintf(path, sizeof(path), "%s", env);
+    } else {
+        const char *xdg = getenv("XDG_CONFIG_HOME");
+        const char *home = getenv("HOME");
+        if (xdg != NULL) {
+            snprintf(path, sizeof(path), "%s/de/config.toml", xdg);
+        } else if (home != NULL) {
+            snprintf(path, sizeof(path), "%s/.config/de/config.toml", home);
+        } else {
+            snprintf(path, sizeof(path), "config.toml");
+        }
+        if (access(path, R_OK) != 0) {
+            snprintf(path, sizeof(path), "config.toml");
+        }
+    }
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL) {
+        wlr_log(WLR_ERROR, "design reload: cannot open '%s'", path);
+        return false;
+    }
+    char errbuf[200];
+    toml_table_t *root = toml_parse_file(fp, errbuf, sizeof(errbuf));
+    fclose(fp);
+    if (root == NULL) {
+        wlr_log(WLR_ERROR, "design reload: '%s': %s", path, errbuf);
+        return false;
+    }
+    struct design_config nd;
+    design_defaults(&nd);
+    toml_table_t *tab = toml_table_in(root, "design");
+    if (tab != NULL) {
+        parse_design_table(&nd, tab);
+    }
+    toml_free(root);
+
+    free(server->design.font);
+    server->design = nd;
+    return true;
+}
+
 static enum wallpaper_mode parse_wallpaper_mode(const char *s) {
     if (strcmp(s, "stretch") == 0) {
         return WALLPAPER_MODE_STRETCH;
@@ -345,6 +565,10 @@ void config_load(struct mywm_server *server, const char *path) {
     if (animations != NULL) {
         config_parse_animations(server, animations);
     }
+    toml_table_t *design = toml_table_in(root, "design");
+    if (design != NULL) {
+        parse_design_table(&server->design, design);
+    }
 
     toml_free(root);
     wlr_log(WLR_INFO, "config: '%s' loaded, %zu bindings active",
@@ -388,4 +612,6 @@ void config_finish(struct mywm_server *server) {
     server->keyboard_layout = NULL;
     free(server->wallpaper_cfg.path);
     server->wallpaper_cfg.path = NULL;
+    free(server->design.font);
+    server->design.font = NULL;
 }

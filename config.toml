@@ -53,3 +53,46 @@ close_slide = 12
 "super+Shift+Right" = "@resize right"
 "super+Shift+Up" = "@resize up"
 "super+Shift+Down" = "@resize down"
+# --- Дизайн оболочки ---
+# Все цвета: hex "#RRGGBB" или "#RRGGBBAA". Размеры в пикселях.
+# Изменения применяются на лету по SIGHUP: pkill -HUP -x DE
+# font          — шрифт менюбара (имя из fontconfig; SF Pro Display
+#                 подгружается из fonts/ проекта).
+# border        — толщина рамки окна.
+# title_height  — высота заголовка окна.
+# button_size   — диаметр круглых кнопок управления окном.
+# button_gap    — зазор между кнопками.
+# menu_bar_height — высота верхнего менюбара.
+# dock_icon / dock_padding / dock_gap — иконки, отступы и зазор дока.
+[design]
+font = "SF Pro Display"
+border = 4
+title_height = 28
+button_size = 11
+button_gap = 6
+menu_bar_height = 26
+dock_icon = 48
+dock_padding = 8
+dock_gap = 6
+
+color_window_border   = "#05050DFF"
+color_window_body     = "#212630FF"
+color_title_focused   = "#6B8CBFFF"
+color_title_unfocused = "#4C576BFF"
+color_border_hover    = "#5973A6FF"
+
+color_btn_close    = "#FF5E57FF"
+color_btn_minimize = "#FFBD2EFF"
+color_btn_maximize = "#29C740FF"
+
+color_bar_bg   = "#1C1F24B8"
+color_bar_line = "#00000040"
+color_bar_text = "#F5F5FAFF"
+color_bar_icon = "#F2F2F7E6"
+
+color_dock_bg        = "#1F1F24BF"
+color_dock_idle      = "#80858FF2"
+color_dock_active    = "#FFFFFFFF"
+color_dock_minimized = "#595C66D9"
+color_dock_sep       = "#80808559"
+color_dock_dot       = "#FFFFFFE6"

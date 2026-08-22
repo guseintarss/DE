@@ -64,11 +64,59 @@ struct animations_config {
     int close_slide;
 };
 
+/*
+ * Дизайн оболочки ([design] в config.toml). Единственный источник
+ * цветов/метрик для менюбара, дока и декораций окон. Меняется на лету:
+ * kill -HUP <pid композитора> перечитывает секцию и применяет её.
+ */
+struct design_config {
+    /* Семейство шрифта менюбара (cairo). */
+    char *font;
+
+    /* Окно: рамка, заголовок, кнопки управления; высота менюбара. */
+    int border;
+    int title_h;
+    int btn_size;
+    int btn_gap;
+    int menu_bar_h;
+
+    /* Док: размер иконки, внутренние отступы и зазор между иконками. */
+    int dock_icon;
+    int dock_pad;
+    int dock_gap;
+
+    /* Цвета — прямые RGBA [0..1] (НЕ premultiplied). Парсинг: hex-строка
+     * "#RRGGBB" или "#RRGGBBAA". */
+    float window_border[4];
+    float window_body[4];
+    float title_focused[4];
+    float title_unfocused[4];
+    float border_hover[4];
+    float btn_close[4];
+    float btn_minimize[4];
+    float btn_maximize[4];
+    float bar_bg[4];
+    float bar_line[4];
+    float bar_text[4];
+    float bar_icon[4];
+    float dock_bg[4];
+    float dock_idle[4];
+    float dock_active[4];
+    float dock_minimized[4];
+    float dock_sep[4];
+    float dock_dot[4];
+};
+
 struct mywm_server;
 
 void config_load_defaults(struct mywm_server *server);
 /* Дефолты для [wallpaper]/[animations] (вызывается до config_load_auto). */
 void config_anim_defaults(struct mywm_server *server);
+/* Дефолты [design] (вызывается до config_load_auto, до создания UI). */
+void config_design_defaults(struct mywm_server *server);
+/* Перечитать только [design] из авто-пути (по SIGHUP) и применить к живым
+ * нодам сцены. Возвращает false, если файл не читается. */
+bool config_design_reload(struct mywm_server *server);
 void config_load(struct mywm_server *server, const char *path);
 void config_load_auto(struct mywm_server *server);
 void config_finish(struct mywm_server *server);

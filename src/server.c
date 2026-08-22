@@ -1,4 +1,5 @@
 #include "server.h"
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -199,6 +200,20 @@ static void add_headless_outputs(struct mywm_server *server) {
     }
 }
 
+/* SIGHUP: перечитать [design] и применить к живой сцене. */
+static int handle_sighup(int signal_number, void *data) {
+    struct mywm_server *server = data;
+    if (signal_number != SIGHUP) {
+        return 0;
+    }
+    if (!config_design_reload(server)) {
+        wlr_log(WLR_ERROR, "design reload failed, keeping previous design");
+        return 0;
+    }
+    design_apply(server);
+    return 0;
+}
+
 void server_init(struct mywm_server *server) {
     wlr_log_init(WLR_DEBUG, NULL);
 
@@ -238,6 +253,12 @@ void server_init(struct mywm_server *server) {
     server->cursor_mode = MYWM_CURSOR_PASSTHROUGH;
 
     server->seat = wlr_seat_create(server->wl_display, "seat0");
+
+    /* SIGHUP: перечитать [design] из config.toml и применить на лету
+     * (pkill -HUP -x DE). */
+    struct wl_event_loop *init_loop =
+        wl_display_get_event_loop(server->wl_display);
+    wl_event_loop_add_signal(init_loop, SIGHUP, handle_sighup, server);
 
     /* Модули этапа 3: курсор (ввод) и xdg-shell (окна). Создают свои
      * wlr-объекты и регистрируют listeners. */

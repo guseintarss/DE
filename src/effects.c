@@ -103,11 +103,7 @@ static struct mywm_chrome_buf *chrome_buf_create(int width, int height) {
     return buf;
 }
 
-static const float chrome_border_color[4] = {0.02f, 0.02f, 0.05f, 1.0f};
-static const float chrome_body_color[4] = {0.13f, 0.15f, 0.19f, 1.0f};
-static const float chrome_title_focused[4] = {0.42f, 0.55f, 0.75f, 1.0f};
-static const float chrome_title_unfocused[4] = {0.30f, 0.34f, 0.42f, 1.0f};
-static const float chrome_border_hover[4] = {0.35f, 0.45f, 0.65f, 1.0f};
+/* Палитра хрома — в server->design ([design] в config.toml). */
 
 /*
  * Заливка хрома (premultiplied ARGB): рамка по контуру, заголовок сверху
@@ -116,7 +112,7 @@ static const float chrome_border_hover[4] = {0.35f, 0.45f, 0.65f, 1.0f};
  */
 static void chrome_draw(struct mywm_chrome_buf *cb, double radius,
                         const float border[4], const float title[4],
-                        const float body[4]) {
+                        const float body[4], int bw, int th) {
     int w = cb->base.width;
     int h = cb->base.height;
     uint32_t *px = cb->data;
@@ -144,10 +140,9 @@ static void chrome_draw(struct mywm_chrome_buf *cb, double radius,
                 }
             }
             const float *c;
-            if (x < DECO_BORDER || x >= w - DECO_BORDER ||
-                    y >= h - DECO_BORDER) {
+            if (x < bw || x >= w - bw || y >= h - bw) {
                 c = border;
-            } else if (y < DECO_TITLE) {
+            } else if (y < th) {
                 c = title;
             } else {
                 c = body;
@@ -166,12 +161,23 @@ static void chrome_draw(struct mywm_chrome_buf *cb, double radius,
  * активной трансформации пропускается: размеры ведёт анимация, а
  * финализация (effects_tform_finalize) пересоздаст хром сама.
  */
+/* Позиция кнопки i на заголовке окна (метрики из [design]). */
+static int view_btn_x(const struct mywm_view *view, int i) {
+    const struct design_config *d = &view->server->design;
+    return d->border + BTN_X + i * (d->btn_size + d->btn_gap);
+}
+static int view_btn_y(const struct mywm_view *view) {
+    const struct design_config *d = &view->server->design;
+    return (d->title_h - d->btn_size) / 2;
+}
+
 void effects_chrome_regen(struct mywm_view *view) {
     if (view->tform_active || view->chrome == NULL) {
         return;
     }
-    int cw = view->width + 2 * DECO_BORDER;
-    int ch = view->height + DECO_TITLE + 2 * DECO_BORDER;
+    const struct design_config *d = &view->server->design;
+    int cw = view->width + 2 * d->border;
+    int ch = view->height + d->title_h + 2 * d->border;
     if (cw <= 0 || ch <= 0) {
         return;
     }
@@ -180,15 +186,15 @@ void effects_chrome_regen(struct mywm_view *view) {
         return;
     }
     const float *title = view->server->focused_view == view ?
-        chrome_title_focused : chrome_title_unfocused;
+        d->title_focused : d->title_unfocused;
     float border[4];
     double t = view->spr_hover.current;
     for (int i = 0; i < 4; i++) {
-        border[i] = chrome_border_color[i] +
-            (chrome_border_hover[i] - chrome_border_color[i]) * t;
+        border[i] = d->window_border[i] +
+            (d->border_hover[i] - d->window_border[i]) * t;
     }
     chrome_draw(nb, EFFECTS_CORNER_RADIUS,
-                border, title, chrome_body_color);
+                border, title, d->window_body, d->border, d->title_h);
 
     wlr_buffer_lock(&nb->base);
     wlr_buffer_drop(&nb->base);
@@ -236,29 +242,32 @@ void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind) {
 
     switch (kind) {
     case TFORM_MAXIMIZE: {
-        double tch = box.height - MENU_BAR_HEIGHT;
+        const struct design_config *d = &server->design;
+        double tch = box.height - d->menu_bar_h;
         b = (struct tform_geo){
             .x = box.x,
-            .y = box.y + MENU_BAR_HEIGHT,
+            .y = box.y + d->menu_bar_h,
             .cw = box.width,
             .ch = tch,
-            .w = box.width - 2 * DECO_BORDER,
-            .h = tch - DECO_TITLE - DECO_BORDER,
+            .w = box.width - 2 * d->border,
+            .h = tch - d->title_h - d->border,
             .op = 1.0,
         };
         break;
     }
-    case TFORM_UNMAXIMIZE:
+    case TFORM_UNMAXIMIZE: {
+        const struct design_config *d = &server->design;
         b = (struct tform_geo){
             .x = view->save_x,
             .y = view->save_y,
-            .cw = view->save_w + 2 * DECO_BORDER,
-            .ch = view->save_h + DECO_TITLE + 2 * DECO_BORDER,
+            .cw = view->save_w + 2 * d->border,
+            .ch = view->save_h + d->title_h + 2 * d->border,
             .w = view->save_w,
             .h = view->save_h,
             .op = 1.0,
         };
         break;
+    }
     case TFORM_GENIE_IN: {
         /* Цель — центр иконки окна в доке. */
         double cx = view->x + view->chrome_w / 2.0;
@@ -353,15 +362,17 @@ void effects_tform_apply(struct mywm_view *view) {
 
     bool genie = view->tform_kind == TFORM_GENIE_IN ||
         view->tform_kind == TFORM_GENIE_OUT;
+    const struct design_config *d = &view->server->design;
     double bs = genie ? (cw / a->cw) : 1.0;
-    double bx0 = (a->cw - cw) / 2.0 + DECO_BORDER + BTN_X;
-    double by0 = (a->ch - ch) / 2.0 + BTN_Y;
+    double bx0 = (a->cw - cw) / 2.0 + view_btn_x(view, 0);
+    double by0 = (a->ch - ch) / 2.0 + view_btn_y(view);
     for (int i = 0; i < 3; i++) {
         wlr_scene_node_set_position(&view->btns[i].node->node,
-                                    bx0 + i * (BTN_SIZE + BTN_GAP) * bs, by0);
+                                    bx0 + i *
+                                        (d->btn_size + d->btn_gap) * bs, by0);
         wlr_scene_buffer_set_dest_size(view->btns[i].node,
-                                       (int)(BTN_SIZE * bs + 0.5),
-                                       (int)(BTN_SIZE * bs + 0.5));
+                                       (int)(d->btn_size * bs + 0.5),
+                                       (int)(d->btn_size * bs + 0.5));
         wlr_scene_buffer_set_opacity(view->btns[i].node, (float)op);
     }
 }
@@ -420,8 +431,8 @@ void effects_tform_finalize(struct mywm_view *view) {
     for (int i = 0; i < 3; i++) {
         wlr_scene_buffer_set_dest_size(view->btns[i].node, 0, 0);
         wlr_scene_node_set_position(&view->btns[i].node->node,
-                                    DECO_BORDER + BTN_X + i * (BTN_SIZE + BTN_GAP),
-                                    BTN_Y);
+                                    view_btn_x(view, i),
+                                    view_btn_y(view));
         wlr_scene_buffer_set_opacity(view->btns[i].node, 1.0f);
     }
     effects_chrome_regen(view);
@@ -461,8 +472,8 @@ void effects_tform_cancel(struct mywm_view *view) {
     for (int i = 0; i < 3; i++) {
         wlr_scene_buffer_set_dest_size(view->btns[i].node, 0, 0);
         wlr_scene_node_set_position(&view->btns[i].node->node,
-                                    DECO_BORDER + BTN_X + i * (BTN_SIZE + BTN_GAP),
-                                    BTN_Y);
+                                    view_btn_x(view, i),
+                                    view_btn_y(view));
         wlr_scene_buffer_set_opacity(view->btns[i].node, 1.0f);
     }
 }

@@ -37,14 +37,15 @@ static struct mywm_view *desktop_view_at(struct mywm_server *server,
  */
 static struct mywm_view *desktop_deco_at(struct mywm_server *server,
         double lx, double ly) {
+    const struct design_config *d = &server->design;
     struct mywm_view *view;
     wl_list_for_each(view, &server->views, link) {
         if (!view->mapped || view->minimized) {
             continue;
         }
-        if (lx >= view->x && lx < view->x + view->width + 2 * DECO_BORDER &&
+        if (lx >= view->x && lx < view->x + view->width + 2 * d->border &&
                 ly >= view->y && ly < view->y + view->height +
-                    DECO_TITLE + 2 * DECO_BORDER) {
+                    d->title_h + 2 * d->border) {
             return view;
         }
     }
@@ -53,47 +54,51 @@ static struct mywm_view *desktop_deco_at(struct mywm_server *server,
 
 /* Попала ли точка в полосу заголовка окна. */
 static bool point_in_title(struct mywm_view *view, double lx, double ly) {
-    return lx >= view->x + DECO_BORDER &&
-        lx < view->x + view->width + DECO_BORDER &&
-        ly >= view->y && ly < view->y + DECO_TITLE;
+    const struct design_config *d = &view->server->design;
+    return lx >= view->x + d->border &&
+        lx < view->x + view->width + d->border &&
+        ly >= view->y && ly < view->y + d->title_h;
 }
 
 /* Какая кнопка управления в заголовке под точкой (MYWM_BTN_NONE — мимо). */
 static enum mywm_title_button title_button_at(struct mywm_view *view,
         double lx, double ly) {
-    double rx = lx - view->x - DECO_BORDER;
+    const struct design_config *d = &view->server->design;
+    int btn_y = (d->title_h - d->btn_size) / 2;
+    double rx = lx - view->x - d->border;
     double ry = ly - view->y;
-    if (ry < BTN_Y || ry >= BTN_Y + BTN_SIZE || rx < BTN_X) {
+    if (ry < btn_y || ry >= btn_y + d->btn_size || rx < BTN_X) {
         return MYWM_BTN_NONE;
     }
     double btn = rx - BTN_X;
-    if (btn < BTN_SIZE) {
+    if (btn < d->btn_size) {
         return MYWM_BTN_CLOSE;
     }
-    if (btn < BTN_SIZE + BTN_GAP) {
+    if (btn < d->btn_size + d->btn_gap) {
         return MYWM_BTN_NONE;
     }
-    if (btn < 2 * BTN_SIZE + BTN_GAP) {
+    if (btn < 2 * d->btn_size + d->btn_gap) {
         return MYWM_BTN_MINIMIZE;
     }
-    if (btn < 2 * BTN_SIZE + 2 * BTN_GAP) {
+    if (btn < 2 * d->btn_size + 2 * d->btn_gap) {
         return MYWM_BTN_NONE;
     }
-    if (btn < 3 * BTN_SIZE + 2 * BTN_GAP) {
+    if (btn < 3 * d->btn_size + 2 * d->btn_gap) {
         return MYWM_BTN_MAXIMIZE;
     }
     return MYWM_BTN_NONE;
 }
-
 /* Какие края окна (WLR_EDGE_*) находятся в хит-зоне ресайза у точки. */
 static uint32_t view_resize_edges(struct mywm_view *view, double lx, double ly) {
     if (view->maximized) {
         return 0;
     }
+    const struct design_config *d = &view->server->design;
     double left = lx - view->x;
-    double right = view->x + view->width + 2 * DECO_BORDER - lx;
+    double right = view->x + view->width + 2 * d->border - lx;
     double top = ly - view->y;
-    double bottom = view->y + view->height + DECO_TITLE + 2 * DECO_BORDER - ly;
+    double bottom = view->y + view->height + d->title_h +
+        2 * d->border - ly;
     uint32_t edges = 0;
     if (left < RESIZE_HIT) {
         edges |= WLR_EDGE_LEFT;
@@ -150,10 +155,11 @@ void clamp_view_to_layout(struct mywm_server *server, struct mywm_view *view,
     if (wlr_box_empty(&layout_box)) {
         return;
     }
+    const struct design_config *d = &server->design;
     const int margin = 20;
-    int min_x = layout_box.x - view->width - 2 * DECO_BORDER + margin;
-    int min_y = layout_box.y - view->height - DECO_TITLE -
-        2 * DECO_BORDER + margin;
+    int min_x = layout_box.x - view->width - 2 * d->border + margin;
+    int min_y = layout_box.y - view->height - d->title_h -
+        2 * d->border + margin;
     int max_x = layout_box.x + layout_box.width - margin;
     int max_y = layout_box.y + layout_box.height - margin;
     /* Окно шире/выше layout: прижимаем левый/верхний край к началу layout. */
@@ -234,8 +240,9 @@ static void process_cursor_resize(struct mywm_server *server) {
     }
 
     struct wlr_box *geo_box = &view->xdg_toplevel->base->geometry;
-    int new_x = new_left - DECO_BORDER - geo_box->x;
-    int new_y = new_top - DECO_TITLE - DECO_BORDER - geo_box->y;
+    const struct design_config *d = &view->server->design;
+    int new_x = new_left - d->border - geo_box->x;
+    int new_y = new_top - d->title_h - d->border - geo_box->y;
     effects_view_set_position(view, new_x, new_y);
     view->x = new_x;
     view->y = new_y;
@@ -356,12 +363,13 @@ void begin_interactive(struct mywm_view *view,
         server->grab_x = server->cursor->x - view->deco_tree->node.x;
         server->grab_y = server->cursor->y - view->deco_tree->node.y;
     } else {
+        const struct design_config *d = &view->server->design;
         struct wlr_box *geo_box = &view->xdg_toplevel->base->geometry;
         /* Содержимое окна в координатах layout: deco_tree позиционируется
          * в layout напрямую, scene_tree — его ребёнок со сдвигом
-         * (DECO_BORDER, DECO_TITLE). */
-        double content_x = view->deco_tree->node.x + DECO_BORDER + geo_box->x;
-        double content_y = view->deco_tree->node.y + DECO_TITLE + geo_box->y;
+         * (border, title). */
+        double content_x = view->deco_tree->node.x + d->border + geo_box->x;
+        double content_y = view->deco_tree->node.y + d->title_h + geo_box->y;
         double border_x = content_x +
             ((edges & WLR_EDGE_RIGHT) ? geo_box->width : 0);
         double border_y = content_y +

@@ -6,12 +6,6 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 
-/* Цвета декораций */
-static const float deco_border_color[4] = {0.15f, 0.15f, 0.15f, 1.0f};
-static const float deco_body_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-static const float deco_title_unfocused[4] = {0.92f, 0.92f, 0.92f, 1.0f};
-static const float deco_title_focused[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-
 /*
  * Размеры хрома привязаны к размеру содержимого окна (view->width/height),
  * который приходит от клиента в commit. Текстура пересоздаётся только при
@@ -21,8 +15,9 @@ static void update_decorations(struct mywm_view *view) {
     if (view->tform_active) {
         return;
     }
-    int cw = view->width + 2 * DECO_BORDER;
-    int ch = view->height + DECO_TITLE + 2 * DECO_BORDER;
+    const struct design_config *d = &view->server->design;
+    int cw = view->width + 2 * d->border;
+    int ch = view->height + d->title_h + 2 * d->border;
     if (view->chrome_buf == NULL || cw != view->chrome_w || ch != view->chrome_h) {
         effects_chrome_regen(view);
     } else {
@@ -152,10 +147,11 @@ void maximize_view(struct mywm_view *view) {
         view->save_y = view->y;
         view->save_w = view->width;
         view->save_h = view->height;
+        const struct design_config *d = &server->design;
         wlr_xdg_toplevel_set_size(view->xdg_toplevel,
-                                  box.width - 2 * DECO_BORDER,
-                                  box.height - MENU_BAR_HEIGHT -
-                                      DECO_TITLE - DECO_BORDER);
+                                  box.width - 2 * d->border,
+                                  box.height - d->menu_bar_h -
+                                      d->title_h - d->border);
         effects_tform_start(view, TFORM_MAXIMIZE);
     }
     bar_update_name(server);
@@ -357,9 +353,10 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     view->x = 100 + idx * 250;
     view->y = 100 + idx * 50;
 
+    const struct design_config *d = &server->design;
     /* Контейнер декораций: бордюр (весь контур), тело и заголовок.
      * Содержимое (scene_tree) — ребёнок контейнера со сдвигом на
-     * (DECO_BORDER, DECO_TITLE). */
+     * (border, title). */
     view->deco_tree = wlr_scene_tree_create(&server->scene->tree);
     if (view->deco_tree == NULL) {
         free(view);
@@ -367,14 +364,14 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     }
     wlr_scene_node_set_position(&view->deco_tree->node, view->x, view->y);
     view->deco_border = wlr_scene_rect_create(view->deco_tree, 0, 0,
-                                              deco_border_color);
+                                              d->window_border);
     view->deco_body = wlr_scene_rect_create(view->deco_tree, 0, 0,
-                                            deco_body_color);
+                                            d->window_body);
     wlr_scene_node_set_position(&view->deco_body->node,
-                                DECO_BORDER, DECO_TITLE);
+                                d->border, d->title_h);
     view->deco_title = wlr_scene_rect_create(view->deco_tree, 0, 0,
-                                             deco_title_unfocused);
-    wlr_scene_node_set_position(&view->deco_title->node, DECO_BORDER, 0);
+                                             d->title_unfocused);
+    wlr_scene_node_set_position(&view->deco_title->node, d->border, 0);
 
     /* Хром окна: одна CPU-текстура со скруглёнными углами поверх rect'ов
      * (эффекты.c). Нода создаётся пустой — текстуру зальёт
@@ -384,18 +381,16 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 
     /* Кнопки управления слева в заголовке (красная/жёлтая/зелёная),
      * круглые как в macOS, с глифами при наведении. */
-    static const float btn_colors[3][4] = {
-        {1.0f, 0.37f, 0.34f, 1.0f},
-        {1.0f, 0.74f, 0.18f, 1.0f},
-        {0.16f, 0.78f, 0.25f, 1.0f},
-    };
+    const float *btn_colors[3] = {d->btn_close, d->btn_minimize,
+                                  d->btn_maximize};
     for (int i = 0; i < 3; i++) {
         view->btns[i] = mywm_btn_create(
-            view->deco_tree, BTN_SIZE, btn_colors[i],
+            view->deco_tree, d->btn_size, btn_colors[i],
             (enum mywm_title_button)(i + 1));
         wlr_scene_node_set_position(
             &view->btns[i].node->node,
-            DECO_BORDER + BTN_X + i * (BTN_SIZE + BTN_GAP), BTN_Y);
+            d->border + BTN_X + i * (d->btn_size + d->btn_gap),
+            (d->title_h - d->btn_size) / 2);
     }
 
     view->scene_tree = wlr_scene_xdg_surface_create(view->deco_tree,
@@ -406,7 +401,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
         return;
     }
     wlr_scene_node_set_position(&view->scene_tree->node,
-                                DECO_BORDER, DECO_TITLE);
+                                d->border, d->title_h);
     view->scene_tree->node.data = view;
     xdg_toplevel->base->data = view->scene_tree;
 
