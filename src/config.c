@@ -73,14 +73,15 @@ void config_load_defaults(struct mywm_server *server) {
                 BIND_ACTION_CYCLE_VIEWS, true, NULL);
     set_binding(server, WLR_MODIFIER_ALT, XKB_KEY_F4,
                 BIND_ACTION_CLOSE, false, NULL);
+    /* GNOME-раскладка: тайлинг к половинам, максимизация, восстановление. */
     set_binding(server, WLR_MODIFIER_LOGO, XKB_KEY_Left,
-                BIND_ACTION_MOVE_LEFT, true, NULL);
+                BIND_ACTION_TILE_LEFT, true, NULL);
     set_binding(server, WLR_MODIFIER_LOGO, XKB_KEY_Right,
-                BIND_ACTION_MOVE_RIGHT, true, NULL);
+                BIND_ACTION_TILE_RIGHT, true, NULL);
     set_binding(server, WLR_MODIFIER_LOGO, XKB_KEY_Up,
-                BIND_ACTION_MOVE_UP, true, NULL);
+                BIND_ACTION_VIEW_MAXIMIZE, true, NULL);
     set_binding(server, WLR_MODIFIER_LOGO, XKB_KEY_Down,
-                BIND_ACTION_MOVE_DOWN, true, NULL);
+                BIND_ACTION_VIEW_RESTORE, true, NULL);
     set_binding(server, WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT, XKB_KEY_Left,
                 BIND_ACTION_RESIZE_LEFT, true, NULL);
     set_binding(server, WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT, XKB_KEY_Right,
@@ -222,6 +223,12 @@ void config_anim_defaults(struct mywm_server *server) {
     server->animations_cfg.close_slide = EFFECTS_CLOSE_SLIDE;
 }
 
+/* Дефолты секций [shell] (переопределяются config.toml). */
+void config_shell_defaults(struct mywm_server *server) {
+    server->shell_cfg.builtin = true;
+    server->shell_cfg.start = NULL;
+}
+
 /* --- [design]: единый источник цветов и метрик оболочки --- */
 
 static void design_defaults(struct design_config *d) {
@@ -238,22 +245,25 @@ static void design_defaults(struct design_config *d) {
     d->dock_pad = 8;
     d->dock_gap = 6;
 
-    /* Окно (хром + rect-фолбэки). */
-    float border[4] = {0.02f, 0.02f, 0.05f, 1.0f};
-    float body[4] = {0.13f, 0.15f, 0.19f, 1.0f};
-    float title_f[4] = {0.42f, 0.55f, 0.75f, 1.0f};
-    float title_u[4] = {0.30f, 0.34f, 0.42f, 1.0f};
-    float hover[4] = {0.35f, 0.45f, 0.65f, 1.0f};
+    /* Окно (Adwaita dark): волосяная рамка, тёмный хедер, без цветной
+     * подсветки. */
+    d->border = 2;
+    float border[4] = {0.00f, 0.00f, 0.00f, 0.55f};
+    float body[4] = {0.118f, 0.118f, 0.125f, 1.0f};
+    float title_f[4] = {0.212f, 0.212f, 0.220f, 1.0f};
+    float title_u[4] = {0.157f, 0.157f, 0.163f, 1.0f};
+    float hover[4] = {0.13f, 0.14f, 0.16f, 0.90f};
     memcpy(d->window_border, border, sizeof(border));
     memcpy(d->window_body, body, sizeof(body));
     memcpy(d->title_focused, title_f, sizeof(title_f));
     memcpy(d->title_unfocused, title_u, sizeof(title_u));
     memcpy(d->border_hover, hover, sizeof(hover));
 
-    /* Кнопки управления (macOS traffic lights). */
-    float btn_c[4] = {1.0f, 0.37f, 0.34f, 1.0f};
-    float btn_m[4] = {1.0f, 0.74f, 0.18f, 1.0f};
-    float btn_x[4] = {0.16f, 0.78f, 0.25f, 1.0f};
+    /* Кнопка закрытия: обычный круг чуть светлее хедера, красный при
+     * наведении задаётся в xdg_shell.c (Adwaita). */
+    float btn_c[4] = {0.292f, 0.292f, 0.300f, 1.0f};
+    float btn_m[4] = {0.292f, 0.292f, 0.300f, 1.0f};
+    float btn_x[4] = {0.292f, 0.292f, 0.300f, 1.0f};
     memcpy(d->btn_close, btn_c, sizeof(btn_c));
     memcpy(d->btn_minimize, btn_m, sizeof(btn_m));
     memcpy(d->btn_maximize, btn_x, sizeof(btn_x));
@@ -505,6 +515,22 @@ static void config_parse_animations(struct mywm_server *server,
             server->animations_cfg.close_slide);
 }
 
+static void config_parse_shell(struct mywm_server *server,
+                               toml_table_t *tab) {
+    toml_datum_t builtin = toml_bool_in(tab, "builtin");
+    if (builtin.ok) {
+        server->shell_cfg.builtin = builtin.u.b;
+    }
+    toml_datum_t start = toml_string_in(tab, "start");
+    if (start.ok && start.u.s[0] != '\0') {
+        free(server->shell_cfg.start);
+        server->shell_cfg.start = strdup(start.u.s);
+    }
+    wlr_log(WLR_INFO, "config: shell builtin=%d start='%s'",
+            server->shell_cfg.builtin,
+            server->shell_cfg.start ? server->shell_cfg.start : "");
+}
+
 void config_load(struct mywm_server *server, const char *path) {
     if (path == NULL) {
         return;
@@ -564,6 +590,10 @@ void config_load(struct mywm_server *server, const char *path) {
     toml_table_t *animations = toml_table_in(root, "animations");
     if (animations != NULL) {
         config_parse_animations(server, animations);
+    }
+    toml_table_t *shell = toml_table_in(root, "shell");
+    if (shell != NULL) {
+        config_parse_shell(server, shell);
     }
     toml_table_t *design = toml_table_in(root, "design");
     if (design != NULL) {

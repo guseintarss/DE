@@ -54,6 +54,21 @@ struct wlr_scene_buffer *icon_create_fallback(struct mywm_icon_manager *mgr,
                                                const float color[4]);
 
 /*
+ * Иконка меню приложений: скруглённый квадрат с сеткой 3x3 точек.
+ */
+struct wlr_scene_buffer *icon_create_launchpad(struct mywm_icon_manager *mgr,
+                                               struct wlr_scene_tree *parent,
+                                               int size);
+
+/*
+ * Однотонный прямоугольник-текстура (фейдится через opacity scene_buffer).
+ */
+struct wlr_scene_buffer *icon_create_solid(struct mywm_icon_manager *mgr,
+                                           struct wlr_scene_tree *parent,
+                                           int w, int h,
+                                           const float color[4]);
+
+/*
  * Получить список доступных тем иконок в системе.
  * Возвращает массив строк, завершённый NULL.
  * Освобождение: icon_theme_list_free().

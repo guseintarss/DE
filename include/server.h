@@ -6,6 +6,7 @@
 #include "effects.h"
 #include "wallpaper.h"
 #include "icons.h"
+#include <cairo.h>
 #include <time.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
@@ -26,6 +27,21 @@ enum mywm_cursor_mode {
     MYWM_CURSOR_MOVE,
     MYWM_CURSOR_RESIZE,
 };
+
+/* Количество слоёв zwlr-layer-shell (background, bottom, top, overlay). */
+#define SHELL_LAYER_COUNT 4
+
+/*
+ * Поверхность layer-shell (waybar, AGSv2, QuickShell и т.п.). Описание
+ * в src/layer_shell.c; списки хранит mywm_server.layer_lists.
+ */
+struct mywm_layer_surface;
+
+/*
+ * Хэндл окна для wlr-foreign-toplevel-management (список окон для
+ * таскбаров/доков внешних оболочек). Описание в src/foreign_toplevel.c.
+ */
+struct mywm_ftl_toplevel;
 
 /* Невидимая хит-зона ресайза по краям окна. */
 #define RESIZE_HIT 6
@@ -58,7 +74,13 @@ struct mywm_dock_item {
     /* Текущая (анимированная) и целевая геометрия в координатах
      * output layout. */
     double cw, ch, tw, th;
+    double vw;                     /* Скорость пружины размера */
     int lx, ly, lw, lh;
+    /* Закреплённый лаунчер: виден всегда (даже без окон), клик без
+     * запущенного приложения выполняет command. */
+    bool pinned;
+    char app_id[64];
+    char command[128];
 };
 
 struct mywm_dock {
@@ -66,12 +88,26 @@ struct mywm_dock {
     struct wlr_scene_tree *tree;
     struct wlr_scene_rect *bar;
     struct wlr_scene_rect *sep;
+    /* Разделитель между закреплёнными лаунчерами и окнами. */
+    struct wlr_scene_rect *sep_pin;
     struct wlr_scene_rect *dot;
     struct wl_list items;
     struct wl_event_source *anim_timer;
+    bool anim_running;             /* Идёт ли сейчас анимация дока */
+    struct timespec anim_last;     /* Время прошлого тика (для dt) */
+    /* Прямоугольник полосы дока в координатах layout (для fisheye). */
+    int bar_x, bar_y, bar_w, bar_h;
 };
 
-struct mywm_text_buf;
+/* CPU-буфер под текст (memfd + cairo), см. bar.c. */
+#include <wlr/interfaces/wlr_buffer.h>
+struct mywm_text_buf {
+    struct wlr_buffer base;
+    int fd;
+    void *data;
+    size_t size;
+    size_t stride;
+};
 struct mywm_chrome_buf;
 
 struct mywm_bar {
@@ -118,6 +154,10 @@ struct mywm_server {
     struct wallpaper_config wallpaper_cfg;
     struct animations_config animations_cfg;
 
+    /* Оболочка ([shell]): builtin=false отключает встроенные менюбар и
+     * док (их место занимает внешняя оболочка через layer-shell). */
+    struct shell_config shell_cfg;
+
     /* Дизайн оболочки ([design]): цвета/метрики менюбара, дока,
      * декораций окон. Применяется на лету по SIGHUP. */
     struct design_config design;
@@ -142,6 +182,25 @@ struct mywm_server {
 
     struct mywm_dock dock;
     struct mywm_bar bar;
+    /* Полноэкранное меню приложений (Launchpad), создаётся в apps_menu_init. */
+    struct mywm_apps_menu *apps_menu;
+
+    /* --- Внешняя оболочка: zwlr-layer-shell + foreign-toplevel --- */
+    /* Глобальные деревья слоёв сцены. Порядок создания задаёт Z-порядок:
+     * background < bottom < view_tree < top < overlay. */
+    struct wlr_scene_tree *layer_trees[SHELL_LAYER_COUNT];
+    /* Списки поверхностей по слоям (struct mywm_layer_surface::link). */
+    struct wl_list layer_lists[SHELL_LAYER_COUNT];
+    struct wlr_layer_shell_v1 *layer_shell;
+    /* Дерево декораций всех xdg-окон (между bottom- и top-слоями). */
+    struct wlr_scene_tree *view_tree;
+    /* Суммарные эксклюзивные зоны layer-поверхностей по краям layout
+     * (пересчитываются в arrange_layers). */
+    int reserved_top, reserved_bottom, reserved_left, reserved_right;
+    struct wlr_foreign_toplevel_manager_v1 *ftl_manager;
+    struct wl_list ftl_toplevels;   /* struct mywm_ftl_toplevel::link */
+
+    struct wl_listener new_layer_surface;
 
     struct wl_list outputs;
     struct wl_list views;
@@ -161,6 +220,9 @@ struct mywm_server {
      * в координатах layout на момент начала жеста. */
     enum mywm_cursor_mode cursor_mode;
     struct mywm_view *grabbed_view;
+    /* Курсор в начале MOVE-жеста: отличаем клик от перетаскивания
+     * (edge-tiling срабатывает только при реальном переносе). */
+    double grab_start_x, grab_start_y;
     double grab_x, grab_y;
     struct wlr_box grab_geobox;
     uint32_t resize_edges;
@@ -221,11 +283,21 @@ struct mywm_view {
     struct wlr_scene_buffer *chrome;
     struct mywm_chrome_buf *chrome_buf;
     int chrome_w, chrome_h;
+    /* Мягкая тень под окном (общая текстура, растягивается dest_size). */
+    struct wlr_scene_buffer *shadow;
+    /* Заголовок окна по центру тайтлбара (белый текст, shell_label_buf). */
+    struct wlr_scene_buffer *title_node;
+    struct mywm_text_buf *title_buf;
+    char *title_cache;
     /* Круглые кнопки в заголовке: 0=CLOSE, 1=MINIMIZE, 2=MAXIMIZE. */
     struct mywm_btn btns[3];
     /* Состояние окна: свёрнуто (узел отключён) / развёрнуто на весь layout. */
     bool minimized;
     bool maximized;
+    /* GNOME-тайлинг: 0 — нет, 1 — левая половина, 2 — правая. */
+    int tiled_side;
+    /* dock_resolve_view выполнен (app_id получен, иконка/пин привязаны). */
+    bool dock_resolved;
     /* Геометрия до максимизации (deco-позиция и размер содержимого). */
     int save_x, save_y, save_w, save_h;
     struct wl_listener map;
@@ -253,6 +325,7 @@ struct mywm_view {
     struct spring_anim spr_opacity;
     struct spring_anim spr_slide;
     struct spring_anim spr_hover;
+    struct spring_anim spr_scale;   /* Масштаб открытия/закрытия */
     bool anim_active;
     /* Анимация закрытия в процессе (финальный destroy отложен). */
     bool closing;
@@ -315,6 +388,8 @@ void focus_view(struct mywm_server *server, struct mywm_view *view,
 void close_view(struct mywm_view *view);
 void minimize_view(struct mywm_view *view);
 void maximize_view(struct mywm_view *view);
+/* GNOME-тайлинг: side 1=левая половина, 2=правая, 0=вернуть как было. */
+void tile_view(struct mywm_view *view, int side);
 /* Финальное освобождение view (вызывается после анимации закрытия). */
 void view_destroy_final(struct mywm_view *view);
 
@@ -324,14 +399,44 @@ void view_destroy_final(struct mywm_view *view);
 /* --- dock.c --- */
 void dock_init(struct mywm_server *server);
 void dock_add_view(struct mywm_server *server, struct mywm_view *view);
+/* Привязка окна к пину / догрузка иконки, когда клиент прислал app_id. */
+void dock_resolve_view(struct mywm_server *server, struct mywm_view *view,
+                       const char *app_id);
 void dock_remove_view(struct mywm_server *server, struct mywm_view *view);
 void dock_refresh(struct mywm_server *server);
 void dock_update(struct mywm_server *server);
 struct mywm_view *dock_icon_at(struct mywm_server *server,
                                double lx, double ly);
+/* Клик по дока-иконке: фокус существующего окна либо запуск закреплённого
+ * лаунчера. Возвращает true, если клик поглощён доком. */
+bool dock_activate_at(struct mywm_server *server, double lx, double ly);
 void dock_raise(struct mywm_server *server);
 /* Повторное применение [design] к доку. */
 void dock_redesign(struct mywm_server *server);
+
+/* --- keyboard.c --- */
+/* Запуск команды через fork/execvp (без шелла). */
+void mywm_spawn(struct mywm_server *server, const char *command);
+
+/* --- apps_menu.c --- */
+void apps_menu_init(struct mywm_server *server);
+void apps_menu_toggle(struct mywm_server *server);
+bool apps_menu_is_open(const struct mywm_server *server);
+void apps_menu_scroll(struct mywm_server *server, double delta,
+                      uint32_t source);
+/* Клик при открытом меню: запуск приложения под курсором либо закрытие.
+ * Всегда поглощает клик (возвращает true). */
+bool apps_menu_click(struct mywm_server *server, double lx, double ly);
+void apps_menu_motion(struct mywm_server *server, double lx, double ly);
+
+/* --- bar.c --- */
+/* Текстовый буфер для подписей оболочки (меню приложений и т.п.). */
+struct mywm_text_buf *shell_label_buf(struct mywm_server *server,
+                                      const char *text, int px);
+struct mywm_text_buf *shell_blank_buf(int width, int height);
+struct mywm_text_buf *shell_label_buf_weight(struct mywm_server *server,
+                                             const char *text, int px,
+                                             cairo_font_weight_t weight);
 
 /* --- icons.c --- */
 void icon_manager_init(struct mywm_icon_manager *mgr,
@@ -350,6 +455,13 @@ struct wlr_scene_buffer *icon_create_fallback(struct mywm_icon_manager *mgr,
                                                struct wlr_scene_tree *parent,
                                                int size,
                                                const float color[4]);
+struct wlr_scene_buffer *icon_create_launchpad(struct mywm_icon_manager *mgr,
+                                               struct wlr_scene_tree *parent,
+                                               int size);
+struct wlr_scene_buffer *icon_create_solid(struct mywm_icon_manager *mgr,
+                                           struct wlr_scene_tree *parent,
+                                           int w, int h,
+                                           const float color[4]);
 char **icon_get_available_themes(void);
 void icon_theme_list_free(char **themes);
 
@@ -365,10 +477,19 @@ enum mywm_title_button bar_button_at(struct mywm_server *server,
 /* Круглая кнопка: буфер с закрашенным кругом и (опционально) глифом. */
 struct mywm_text_buf *mywm_button_buf(int size, const float color[4],
                                       enum mywm_title_button glyph);
-/* Полный набор кнопки: узел + оба буфера, начальное состояние — круг. */
+struct mywm_text_buf *mywm_button_buf_fg(int size, const float bg[4],
+                                         enum mywm_title_button glyph,
+                                         const float fg[4]);
+/* Полный набор кнопки: узел + оба буфера, начальное состояние — круг.
+ * Вариант _h позволяет задать фон/цвет глифа при наведении (Adwaita). */
 struct mywm_btn mywm_btn_create(struct wlr_scene_tree *parent, int size,
                                 const float color[4],
                                 enum mywm_title_button glyph_btn);
+struct mywm_btn mywm_btn_create_h(struct wlr_scene_tree *parent, int size,
+                                  const float color[4],
+                                  enum mywm_title_button glyph_btn,
+                                  const float hover_bg[4],
+                                  const float hover_fg[4]);
 /* Переключает узел кнопки между глифом и обычным кругом. */
 void mywm_button_hover(struct mywm_btn *btn, bool hovered);
 /* Пересоздаёт кнопку с новыми цветом/размером ([design] reload).
@@ -381,5 +502,28 @@ void mywm_btn_recreate(struct wlr_scene_tree *parent, struct mywm_btn *btn,
 /* Применяет server->design ко всем живым нодам: декорации окон, хром,
  * кнопки, менюбар, док. Вызывается после config_design_reload (SIGHUP). */
 void design_apply(struct mywm_server *server);
+
+/* --- layer_shell.c --- */
+/* Глобальные деревья слоёв, менеджер zwlr-layer-shell, обработка новых
+ * layer-поверхностей. Вызывать сразу после создания сцены. */
+void layer_shell_init(struct mywm_server *server);
+/* Пересобрать расположение всех layer-поверхностей и полезную область
+ * (вызывается при map/unmap/commit слоёв и появлении выхода). */
+void arrange_layers(struct mywm_server *server);
+/* Полезная область layout: layout минус эксклюзивные зоны слоёв и
+ * встроенный менюбар (если [shell].builtin). */
+struct wlr_box shell_usable_box(struct mywm_server *server);
+/* Пере-разместить максимизированные/тайленные окна под новую полезную
+ * область. Вызывается после её изменения. */
+void shell_relayout(struct mywm_server *server);
+
+/* --- foreign_toplevel.c --- */
+void foreign_toplevel_init(struct mywm_server *server);
+/* Жизненный цикл хэндла окна: создание при map, закрытие при unmap/
+ * destroy, обновление title/app_id/state по мере изменения. */
+void foreign_toplevel_map(struct mywm_view *view);
+void foreign_toplevel_unmap(struct mywm_view *view);
+void foreign_toplevel_title(struct mywm_view *view);
+void foreign_toplevel_state(struct mywm_view *view);
 
 #endif

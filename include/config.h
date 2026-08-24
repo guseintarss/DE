@@ -22,6 +22,11 @@ enum binding_action {
     BIND_ACTION_RESIZE_DOWN,
     BIND_ACTION_RESIZE_LEFT,
     BIND_ACTION_RESIZE_RIGHT,
+    /* GNOME-стиль управления окном: тайлинг к половинам и максимизация. */
+    BIND_ACTION_TILE_LEFT,      /* Super+Left: левая половина */
+    BIND_ACTION_TILE_RIGHT,     /* Super+Right: правая половина */
+    BIND_ACTION_VIEW_MAXIMIZE,  /* Super+Up: максимизация */
+    BIND_ACTION_VIEW_RESTORE,   /* Super+Down: восстановить/свернуть */
 };
 
 struct keybinding {
@@ -51,6 +56,19 @@ struct wallpaper_config {
     /* Путь к файлу обоев (NULL/пусто — встроенные из assets/). */
     char *path;
     enum wallpaper_mode mode;
+};
+
+/*
+ * Оболочка ([shell] в config.toml). builtin=true — менюбар и док рисует
+ * сам композитор (bar.c/dock.c); builtin=false — встроенная оболочка
+ * выключена, поверх работают внешние клиенты (waybar, AGSv2, QuickShell)
+ * через zwlr-layer-shell.
+ */
+struct shell_config {
+    bool builtin;
+    /* Команда внешней оболочки, запускаемая автоматически при старте
+     * композитора (только при builtin=false). Пусто — не запускать. */
+    char *start;
 };
 
 struct animations_config {
@@ -112,6 +130,8 @@ struct mywm_server;
 void config_load_defaults(struct mywm_server *server);
 /* Дефолты для [wallpaper]/[animations] (вызывается до config_load_auto). */
 void config_anim_defaults(struct mywm_server *server);
+/* Дефолты [shell] (вызывается до config_load_auto). */
+void config_shell_defaults(struct mywm_server *server);
 /* Дефолты [design] (вызывается до config_load_auto, до создания UI). */
 void config_design_defaults(struct mywm_server *server);
 /* Перечитать только [design] из авто-пути (по SIGHUP) и применить к живым

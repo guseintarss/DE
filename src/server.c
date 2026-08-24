@@ -14,10 +14,12 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
 #include <wlr/util/log.h>
@@ -119,6 +121,13 @@ static void server_new_output(struct wl_listener *listener, void *data) {
     wl_list_insert(&server->outputs, &output->link);
     wlr_output_layout_add_auto(server->output_layout, wlr_output);
 
+    /* Оболочка привязана к layout: пересчитать слои/полезную область и
+     * встроенную оболочку под новый выход (dock_init/bar_init выполняются
+     * до появления мониторов). */
+    arrange_layers(server);
+    dock_refresh(server);
+    bar_update_name(server);
+
     wlr_log(WLR_INFO, "New output: %s (%dx%d)",
             wlr_output->name, wlr_output->width, wlr_output->height);
 }
@@ -156,7 +165,7 @@ static void server_new_virtual_keyboard(struct wl_listener *listener, void *data
     struct mywm_server *server =
         wl_container_of(listener, server, new_virtual_keyboard);
     struct wlr_virtual_keyboard_v1 *vk = data;
-    struct wlr_input_device *kb_device = wlr_virtual_keyboard_v1_get_input_device(vk);
+    struct wlr_input_device *kb_device = &vk->keyboard.base;
     if (kb_device) {
         server_new_keyboard(server, wlr_keyboard_from_input_device(kb_device));
         update_seat_caps(server);
@@ -167,40 +176,10 @@ static void server_new_virtual_pointer(struct wl_listener *listener, void *data)
     struct mywm_server *server =
         wl_container_of(listener, server, new_virtual_pointer);
     struct wlr_virtual_pointer_v1_new_pointer_event *event = data;
-    struct wlr_input_device *ptr_device = wlr_virtual_pointer_v1_get_input_device(event->new_pointer);
+    struct wlr_input_device *ptr_device = &event->new_pointer->pointer.base;
     if (ptr_device) {
         server_new_pointer(server, ptr_device);
         update_seat_caps(server);
-    }
-}
-
-static void find_headless_backend(struct wlr_backend *backend, void *data) {
-    if (wlr_backend_is_headless(backend)) {
-        *(struct wlr_backend **)data = backend;
-    }
-}
-
-static void add_headless_outputs(struct mywm_server *server) {
-    const char *headless_outputs = getenv("WLR_HEADLESS_OUTPUTS");
-    if (headless_outputs == NULL) {
-        return;
-    }
-    int count = atoi(headless_outputs);
-    if (count <= 0) {
-        return;
-    }
-    struct wlr_backend *headless = NULL;
-    if (wlr_backend_is_multi(server->backend)) {
-        wlr_multi_for_each_backend(server->backend, find_headless_backend, &headless);
-    } else if (wlr_backend_is_headless(server->backend)) {
-        headless = server->backend;
-    }
-    if (headless == NULL) {
-        wlr_log(WLR_ERROR, "WLR_HEADLESS_OUTPUTS set but no headless backend found");
-        return;
-    }
-    for (int i = 0; i < count; i++) {
-        wlr_headless_add_output(headless, 1280, 720);
     }
 }
 
@@ -227,13 +206,18 @@ void server_init(struct mywm_server *server) {
     server->renderer = wlr_renderer_autocreate(server->backend);
     wlr_renderer_init_wl_display(server->renderer, server->wl_display);
 
-    add_headless_outputs(server);
+    /* Выходы для headless-тестов создаёт сам wlroots из WLR_HEADLESS_OUTPUTS. */
 
     server->allocator = wlr_allocator_autocreate(server->backend, server->renderer);
     server->compositor = wlr_compositor_create(server->wl_display, 6,
                                                server->renderer);
     server->output_layout = wlr_output_layout_create(server->wl_display);
     server->scene = wlr_scene_create();
+
+    /* Слои zwlr-layer-shell и дерево окон: создаются сразу после сцены,
+     * чтобы задать Z-порядок (окна между bottom- и top-слоями), до
+     * деревьев встроенной оболочки и до появления выходов/клиентов. */
+    layer_shell_init(server);
 
     server->xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (server->xkb_context == NULL) {
@@ -243,6 +227,7 @@ void server_init(struct mywm_server *server) {
     /* Конфиг грузится до обоев: [wallpaper].path влияет на выбор файла. */
     config_load_defaults(server);
     config_anim_defaults(server);
+    config_shell_defaults(server);
     config_load_auto(server);
 
     server->wallpaper = wallpaper_load_auto(server);
@@ -268,8 +253,16 @@ void server_init(struct mywm_server *server) {
      * wlr-объекты и регистрируют listeners. */
     cursor_init(server);
     xdg_shell_init(server);
+    /* Скриншоты для отладки: grim-совместимые клиенты (wlr-screencopy). */
+    wlr_screencopy_manager_v1_create(server->wl_display);
+    /* Имена/геометрия выходов для клиентов waybar и др. (zxdg_output). */
+    wlr_xdg_output_manager_v1_create(server->wl_display,
+                                     server->output_layout);
+    /* Публикация окон для таскбаров/доков внешних оболочек. */
+    foreign_toplevel_init(server);
     dock_init(server);
     bar_init(server);
+    apps_menu_init(server);
 
     server->new_output.notify = server_new_output;
     wl_signal_add(&server->backend->events.new_output, &server->new_output);
@@ -300,6 +293,13 @@ void server_run(struct mywm_server *server) {
     if (!wlr_backend_start(server->backend)) {
         wl_display_destroy(server->wl_display);
         exit(1);
+    }
+    /* Автозапуск внешней оболочки (QuickShell и т.п.): сокет уже создан,
+     * WAYLAND_DISPLAY установлен — клиент подключится сразу. */
+    if (!server->shell_cfg.builtin && server->shell_cfg.start != NULL
+            && server->shell_cfg.start[0] != '\0') {
+        wlr_log(WLR_INFO, "autostart shell: %s", server->shell_cfg.start);
+        mywm_spawn(server, server->shell_cfg.start);
     }
     struct wl_event_loop *loop = wl_display_get_event_loop(server->wl_display);
     while (!server->terminate) {

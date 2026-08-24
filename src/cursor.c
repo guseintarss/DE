@@ -1,4 +1,5 @@
 #include "server.h"
+#include <math.h>
 #include <stdlib.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_scene.h>
@@ -150,23 +151,20 @@ void reset_cursor_mode(struct mywm_server *server) {
  */
 void clamp_view_to_layout(struct mywm_server *server, struct mywm_view *view,
                           int *x, int *y) {
-    struct wlr_box *layout_box = wlr_output_layout_get_box(server->output_layout, NULL);
-    if (layout_box == NULL || wlr_box_empty(layout_box)) {
+    struct wlr_box layout_box;
+    wlr_output_layout_get_box(server->output_layout, NULL, &layout_box);
+    if (wlr_box_empty(&layout_box)) {
         return;
     }
     const struct design_config *d = &server->design;
     const int margin = 20;
-    int min_x = layout_box->x - view->width - 2 * DECO_BORDER + margin;
-    int min_y = layout_box->y - view->height - DECO_TITLE -
-        2 * DECO_BORDER + margin;
-    int max_x = layout_box->x + layout_box->width - margin;
-    int max_y = layout_box->y + layout_box->height - margin;
+
     /* Окно шире/выше layout: прижимаем левый/верхний край к началу layout. */
     if (min_x > max_x) {
-        min_x = max_x = layout_box->x;
+        min_x = max_x = layout_box.x;
     }
     if (min_y > max_y) {
-        min_y = max_y = layout_box->y;
+        min_y = max_y = layout_box.y;
     }
     if (*x < min_x) {
         *x = min_x;
@@ -238,13 +236,7 @@ static void process_cursor_resize(struct mywm_server *server) {
         }
     }
 
-    struct wlr_box *geo_box = &view->xdg_toplevel->base->current.geometry;
-    int new_x = new_left - DECO_BORDER - geo_box->x;
-    int new_y = new_top - DECO_TITLE - DECO_BORDER - geo_box->y;
-    effects_view_set_position(view, new_x, new_y);
-    view->x = new_x;
-    view->y = new_y;
-    wlr_xdg_toplevel_set_size(view->xdg_toplevel->base,
+
                               new_right - new_left, new_bottom - new_top);
     wlr_log(WLR_DEBUG, "cursor resize: view=%p size=%dx%d",
             (void *)view, new_right - new_left, new_bottom - new_top);
@@ -256,13 +248,13 @@ static void update_buttons_hover(struct mywm_server *server) {
     double cy = server->cursor->y;
     struct mywm_view *view = server->focused_view;
     for (int i = 0; i < 3; i++) {
-        bool over = false;
-        if (view != NULL && view->mapped && !view->maximized) {
-            over = title_button_at(view, cx, cy) == (enum mywm_title_button)(i + 1);
+        if (view == NULL || view->btns[i].node == NULL) {
+            continue;
         }
-        if (view != NULL) {
-            mywm_button_hover(&view->btns[i], over);
-        }
+        bool over = !view->maximized &&
+            title_button_at(view, cx, cy) ==
+                (enum mywm_title_button)(i + 1);
+        mywm_button_hover(&view->btns[i], over);
     }
     for (int i = 0; i < 3; i++) {
         bool over = bar_button_at(server, cx, cy) ==
@@ -283,6 +275,13 @@ static void process_cursor_motion(struct mywm_server *server, uint32_t time) {
     double sx, sy;
     struct wlr_seat *seat = server->seat;
     struct wlr_surface *surface = NULL;
+    /* Открытое меню приложений поглощает ввод: ховер по его ячейкам,
+     * окна под оверлеем не получают pointer-события. */
+    if (apps_menu_is_open(server)) {
+        apps_menu_motion(server, server->cursor->x, server->cursor->y);
+        wlr_seat_pointer_clear_focus(seat);
+        return;
+    }
     struct mywm_view *view = desktop_view_at(server,
             server->cursor->x, server->cursor->y, &surface, &sx, &sy);
     if (view == NULL) {
@@ -325,7 +324,7 @@ static void server_cursor_motion(struct wl_listener *listener, void *data) {
     if (event == NULL) {
         return;
     }
-    wlr_cursor_move(server->cursor, event->pointer,
+    wlr_cursor_move(server->cursor, &event->pointer->base,
                     event->delta_x, event->delta_y);
     process_cursor_motion(server, event->time_msec);
 }
@@ -337,7 +336,7 @@ static void server_cursor_motion_absolute(struct wl_listener *listener, void *da
     if (event == NULL) {
         return;
     }
-    wlr_cursor_warp_absolute(server->cursor, event->pointer,
+    wlr_cursor_warp_absolute(server->cursor, &event->pointer->base,
                              event->x, event->y);
     process_cursor_motion(server, event->time_msec);
 }
@@ -362,28 +361,67 @@ void begin_interactive(struct mywm_view *view,
         wlr_scene_node_coords(&view->deco_tree->node, &deco_x, &deco_y);
         server->grab_x = server->cursor->x - deco_x;
         server->grab_y = server->cursor->y - deco_y;
+        server->grab_start_x = server->cursor->x;
+        server->grab_start_y = server->cursor->y;
     } else {
-        struct wlr_box *geo_box = &view->xdg_toplevel->base->current.geometry;
-        /* Содержимое окна в координатах layout: deco_tree позиционируется
-         * в layout напрямую, scene_tree — его ребёнок со сдвигом
-         * (DECO_BORDER, DECO_TITLE). */
-        int deco_x, deco_y;
-        wlr_scene_node_coords(&view->deco_tree->node, &deco_x, &deco_y);
-        double content_x = deco_x + DECO_BORDER + geo_box->x;
-        double content_y = deco_y + DECO_TITLE + geo_box->y;
+
         double border_x = content_x +
-            ((edges & WLR_EDGE_RIGHT) ? geo_box->width : 0);
+            ((edges & WLR_EDGE_RIGHT) ? geo_box.width : 0);
         double border_y = content_y +
-            ((edges & WLR_EDGE_BOTTOM) ? geo_box->height : 0);
+            ((edges & WLR_EDGE_BOTTOM) ? geo_box.height : 0);
         server->grab_x = server->cursor->x - border_x;
         server->grab_y = server->cursor->y - border_y;
-        server->grab_geobox = *geo_box;
+        server->grab_geobox = geo_box;
         server->grab_geobox.x += content_x;
         server->grab_geobox.y += content_y;
         server->resize_edges = edges;
     }
     wlr_log(WLR_DEBUG, "begin_interactive: view=%p mode=%d edges=0x%x",
             (void *)view, mode, edges);
+}
+
+/*
+ * GNOME edge tiling: бросил окно у левого/правого края — тайл на половину,
+ * у верхнего края — максимизация. Вызывается при завершении MOVE-жеста
+ * и только если окно реально перетаскивалось (иначе случайный клик у
+ * края тайлил окно без ведома пользователя).
+ */
+#define TILE_EDGE_PX 12
+#define TILE_DRAG_MIN_PX 24
+
+static void move_end_edge_actions(struct mywm_server *server) {
+    struct mywm_view *view = server->grabbed_view;
+    if (view == NULL || server->cursor_mode != MYWM_CURSOR_MOVE) {
+        return;
+    }
+    double dx = server->cursor->x - server->grab_start_x;
+    double dy = server->cursor->y - server->grab_start_y;
+    if (sqrt(dx * dx + dy * dy) < TILE_DRAG_MIN_PX) {
+        return;
+    }
+    const struct design_config *d = &server->design;
+    struct wlr_box box;
+    wlr_output_layout_get_box(server->output_layout, NULL, &box);
+    struct wlr_box usable = shell_usable_box(server);
+    double cx = server->cursor->x;
+    double cy = server->cursor->y;
+    /* Учитываем точку под курсором И край самого окна. */
+    bool left = cx <= box.x + TILE_EDGE_PX ||
+        view->x <= box.x + 2;
+    bool right = cx >= box.x + box.width - TILE_EDGE_PX ||
+        view->x + view->width + 2 * d->border >=
+            box.x + box.width - 2;
+    bool top = usable.height > 0 &&
+        cy <= usable.y + TILE_EDGE_PX;
+    if (top && !left && !right) {
+        maximize_view(view);
+        return;
+    }
+    if (left) {
+        tile_view(view, 1);
+    } else if (right) {
+        tile_view(view, 2);
+    }
 }
 
 /*
@@ -400,11 +438,19 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     wlr_seat_pointer_notify_button(server->seat, event->time_msec,
                                    event->button, event->state);
     if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        move_end_edge_actions(server);
         reset_cursor_mode(server);
         return;
     }
     double cx = server->cursor->x;
     double cy = server->cursor->y;
+
+    /* Открытое меню приложений поглощает клики: запуск иконки или
+     * закрытие по клику мимо. */
+    if (apps_menu_is_open(server)) {
+        apps_menu_click(server, cx, cy);
+        return;
+    }
 
     /* Клик по кнопкам максимизированного окна в менюбаре. */
     enum mywm_title_button bar_btn = bar_button_at(server, cx, cy);
@@ -427,10 +473,9 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
         return;
     }
 
-    /* Клик по иконке дока: фокус/восстановление окна. */
-    struct mywm_view *dock_view = dock_icon_at(server, cx, cy);
-    if (dock_view != NULL) {
-        focus_view(server, dock_view, dock_view->xdg_toplevel->base->surface);
+    /* Клик по иконке дока: фокус/восстановление окна либо запуск
+     * закреплённого приложения. */
+    if (dock_activate_at(server, cx, cy)) {
         return;
     }
 
@@ -500,9 +545,16 @@ static void server_cursor_axis(struct wl_listener *listener, void *data) {
     if (event == NULL) {
         return;
     }
+    /* Колесо при открытом меню приложений листает сетку. */
+    if (apps_menu_is_open(server)) {
+        apps_menu_scroll(server, event->delta, event->source);
+        wlr_seat_pointer_notify_frame(server->seat);
+        return;
+    }
     wlr_seat_pointer_notify_axis(server->seat, event->time_msec,
                                  event->orientation, event->delta,
-                                 event->delta_discrete);
+                                 event->delta_discrete, event->source,
+                                 event->relative_direction);
 }
 
 static void server_cursor_frame(struct wl_listener *listener, void *data) {

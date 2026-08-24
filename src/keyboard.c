@@ -134,6 +134,11 @@ static void spawn_command(struct mywm_server *server, const char *command) {
     _exit(127);
 }
 
+/* Публичная обёртка над spawn_command (клик по закреплённой иконке дока). */
+void mywm_spawn(struct mywm_server *server, const char *command) {
+    spawn_command(server, command);
+}
+
 static void binding_move_view(struct mywm_server *server, int dx, int dy) {
     struct mywm_view *view = server->focused_view;
     if (view == NULL || !view->mapped) {
@@ -227,6 +232,33 @@ static void run_binding(struct mywm_server *server,
     case BIND_ACTION_RESIZE_RIGHT:
         binding_resize_view(server, RESIZE_STEP, 0);
         break;
+    case BIND_ACTION_TILE_LEFT:
+    case BIND_ACTION_TILE_RIGHT:
+    case BIND_ACTION_VIEW_MAXIMIZE:
+    case BIND_ACTION_VIEW_RESTORE: {
+        struct mywm_view *fv = server->focused_view;
+        if (fv == NULL || !fv->mapped) {
+            break;
+        }
+        if (binding->action == BIND_ACTION_TILE_LEFT) {
+            tile_view(fv, 1);
+        } else if (binding->action == BIND_ACTION_TILE_RIGHT) {
+            tile_view(fv, 2);
+        } else if (binding->action == BIND_ACTION_VIEW_MAXIMIZE) {
+            maximize_view(fv);
+        } else if (fv->tiled_side != 0 || fv->maximized) {
+            /* GNOME: Super+Down разворачивает обратно, потом сворачивает. */
+            if (fv->tiled_side != 0) {
+                tile_view(fv, 0);
+            }
+            if (fv->maximized) {
+                maximize_view(fv);
+            }
+        } else {
+            minimize_view(fv);
+        }
+        break;
+    }
     }
 }
 
@@ -280,6 +312,19 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
     uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
     bool is_repeat = keyboard_is_repeat(keyboard, event);
     bool handled = false;
+
+    /* Esc закрывает открытое меню приложений, клавиша не уходит клиенту. */
+    if (apps_menu_is_open(server) &&
+            event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        for (int i = 0; i < nsyms; i++) {
+            if (syms[i] == XKB_KEY_Escape) {
+                apps_menu_toggle(server);
+                handled = true;
+                break;
+            }
+        }
+    }
+
     if (nsyms > 0) {
         /* Ищем биндинг по модификаторам (через depressed, а не сырые коды)
          * и любому из символьных значений клавиши (с Shift символы меняются). */

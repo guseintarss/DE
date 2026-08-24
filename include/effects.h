@@ -28,6 +28,11 @@ struct mywm_view;
 /* Сдвиг вверх при закрытии (px). */
 #define EFFECTS_CLOSE_SLIDE 12
 
+/* Масштаб окна в начале открытия и в конце закрытия (zoom macOS).
+ * Эмулируется через dest_size хрома и содержимого вокруг центра. */
+#define EFFECTS_OPEN_SCALE 0.92
+#define EFFECTS_CLOSE_SCALE 0.94
+
 /* Жёсткая пружина трансформаций (maximize/unmaximize/genie): визуально
  * завершается за ~0.3 с, как зелёная кнопка в macOS. */
 #define EFFECTS_TFORM_STIFFNESS 700.0
@@ -89,6 +94,19 @@ struct tform_geo {
  * заголовок — фокусом. Во время активной трансформации не вызывается
  * (размеры ведёт анимация; финализация пересоздаст сама). */
 void effects_chrome_regen(struct mywm_view *view);
+/* Тень под окном: общая размытая текстура, геометрия считается вызывающим
+ * (dx,dy — позиция ноды, dw,dh — dest_size, alpha 0..1). */
+#define EFFECTS_SHADOW_MARGIN 28
+#define EFFECTS_SHADOW_BIAS 6
+void effects_shadow_place(struct mywm_view *view, int dx, int dy,
+                          int dw, int dh, float alpha);
+/* Тень в естественное положение вокруг текущего хрома. */
+void effects_shadow_reset_alpha(struct mywm_view *view, float alpha);
+/* Заголовок окна: применение zoom/transform (bs, смещения, альфа) и
+ * возврат к естественной геометрии. Реализация в xdg_shell.c. */
+void view_title_apply_anim(struct mywm_view *view, double bs,
+                           double off_x, double off_y, float alpha);
+void view_title_reset_anim(struct mywm_view *view, float alpha);
 /* Старт трансформации kind. Останавливает open/close-пружины. */
 void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind);
 /* Применение интерполяции по прогрессу пружины (вызывается из тика). */
