@@ -112,7 +112,17 @@ PanelWindow {
                         anchors.verticalCenter: parent.verticalCenter
                         width: 28
                         height: 28
-                        source: row.modelData.icon || ""
+                        // IconImage не резолвит имена темы — через iconPath.
+                        source: {
+                            let n = row.modelData.icon || "";
+                            if (n === "")
+                                return "";
+                            try {
+                                return Quickshell.iconPath(n, "image-missing");
+                            } catch (err) {
+                                return n;
+                            }
+                        }
                         asynchronous: true
                     }
                     Text {
