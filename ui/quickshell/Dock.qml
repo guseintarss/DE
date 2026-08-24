@@ -14,16 +14,72 @@ PanelWindow {
     }
     // Якорь только снизу: композитор сам центрирует окно по горизонтали.
     // Ширина с запасом — видимая «капсула» дока центрируется внутри сама.
+    // Высота с запасом сверху: там рисуется лейбл приложения.
     implicitWidth: 900
-    implicitHeight: 70
+    implicitHeight: 140
+    // Без этого окно рисуется дефолтным белым фоном Qt.
+    color: "transparent"
 
     // Плавающая капсула поверх окон; место снизу резервирует
     // ExclusionMode.Auto.
     WlrLayershell.layer: WlrLayer.Top
-    color: "transparent"
-    exclusionMode: ExclusionMode.Auto
+
+    // Ввод принимает только капсула дока: прозрачный верхний пояс
+    // (зона лейбла) не должен перехватывать клики у окон под ним.
+    mask: Region {
+        item: dockBg
+    }
 
     readonly property string iconFont: "SF Pro Display, Segoe UI, sans-serif"
+
+    // === ОБЩИЙ ЛЕЙБЛ ПРИЛОЖЕНИЯ (над доком, стиль macOS) ===
+    property Item hoveredOwner: null
+    property string hoveredName: ""
+    property real hoveredX: 0 // центр иконки в координатах окна
+
+    function hoverLabel(owner, name, centerX) {
+        hoveredOwner = owner;
+        hoveredName = name;
+        hoveredX = centerX;
+    }
+
+    function unhoverLabel(owner) {
+        if (hoveredOwner === owner) {
+            hoveredOwner = null;
+            hoveredName = "";
+        }
+    }
+
+    // Плашка с именем приложения над капсулой
+    Rectangle {
+        id: appLabel
+        visible: opacity > 0.01
+        opacity: root.hoveredName === "" ? 0 : 1
+        Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
+
+        readonly property real pillTop: parent.height - 64 // 56 капсула + 8 отступ
+        y: pillTop - height - 6
+        x: Math.max(8, Math.min(parent.width - width - 8, root.hoveredX - width / 2))
+
+        width: Math.min(labelText.implicitWidth + 20, 280)
+        height: 26
+        radius: 8
+        color: "#E61C1C1E"
+        border.color: "#33FFFFFF"
+        border.width: 1
+
+        Text {
+            id: labelText
+            anchors.centerIn: parent
+            width: Math.min(implicitWidth, parent.width - 12)
+            elide: Text.ElideMiddle
+            text: root.hoveredName
+            color: "#FFFFFF"
+            font.family: root.iconFont
+            font.pixelSize: 12
+            font.weight: Font.Medium
+        }
+    }
 
     readonly property var pinnedApps: [
         { appId: "Alacritty", name: "Т_TERMINAL", cmd: ["alacritty"], fallback: "utilities-terminal" },
@@ -143,26 +199,6 @@ PanelWindow {
             }
         }
 
-        // Всплывающая подсказка
-        ToolTip {
-            visible: dockItemArea.containsMouse && dockItemTemplate.appName !== ""
-            delay: 500
-            text: dockItemTemplate.appName
-            // Стилизация тултипа (работает в большинстве тем)
-            background: Rectangle {
-                color: "#E61C1C1E"
-                border.color: "#33FFFFFF"
-                radius: 6
-            }
-            contentItem: Text {
-                text: parent.text
-                color: "#FFFFFF"
-                font.family: root.iconFont
-                font.pixelSize: 12
-                font.weight: Font.Medium
-            }
-        }
-
         // Область клика
         MouseArea {
             id: dockItemArea
@@ -170,6 +206,16 @@ PanelWindow {
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+            // Имя показывается в общем лейбле НАД доком
+            onHoveredChanged: {
+                if (containsMouse) {
+                    const p = dockItemTemplate.mapToItem(
+                        root.contentItem, dockItemTemplate.width / 2, 0);
+                    root.hoverLabel(dockItemTemplate, dockItemTemplate.appName, p.x);
+                } else {
+                    root.unhoverLabel(dockItemTemplate);
+                }
+            }
             onClicked: (mouse) => {
                 if (mouse.button === Qt.MiddleButton) {
                     dockItemTemplate.middleClicked();
