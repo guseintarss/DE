@@ -58,11 +58,24 @@ static bool tform_spring_settled(const struct spring_anim *s) {
         (fabs(s->target - s->current) < 0.002 && fabs(s->velocity) < 0.02);
 }
 
-/* Позиция декораций с учётом slide-анимации, opacity, hover и
- * активной трансформации. */
+/* Метрики кнопок заголовка (дубль static-хелперов из effects.c). */
+static int anim_btn_x(const struct mywm_view *view, int i) {
+    const struct design_config *d = &view->server->design;
+    return d->border + BTN_X + i * (d->btn_size + d->btn_gap);
+}
+static int anim_btn_y(const struct mywm_view *view) {
+    const struct design_config *d = &view->server->design;
+    return (d->title_h - d->btn_size) / 2;
+}
+
+/*
+ * Позиция декораций с учётом slide-анимации, opacity, zoom-масштаба
+ * (open/close) и активной трансформации. Масштаб эмулируется через
+ * dest_size хрома/контента/кнопок вокруг центра окна — тот же приём,
+ * что в effects_tform_apply.
+ */
 static void apply_view_transforms(struct mywm_view *view) {
     struct spring_anim *slide = &view->spr_slide;
-    struct spring_anim *opacity = &view->spr_opacity;
 
     if (view->tform_active) {
         effects_tform_apply(view);
@@ -71,31 +84,99 @@ static void apply_view_transforms(struct mywm_view *view) {
 
     wlr_scene_node_set_position(&view->deco_tree->node,
                                 view->x, view->y + slide->current);
-    float alpha = (float)fmax(0.0, fmin(1.0, opacity->current));
+    float alpha = (float)fmax(0.0, fmin(1.0, view->spr_opacity.current));
 
-    if (view->closing) {
-        /* Контент клиента уже уничтожен wlroots вместе с scene_tree:
-         * фейдим хром (текстуру) и кнопки через нативную непрозрачность
-         * scene_buffer. */
-        if (view->chrome_buf != NULL) {
-            wlr_scene_buffer_set_opacity(view->chrome, alpha);
-        }
-        if (view->content_buffer != NULL) {
-            wlr_scene_buffer_set_opacity(view->content_buffer, alpha);
-        }
-        for (int i = 0; i < 3; i++) {
-            wlr_scene_buffer_set_opacity(view->btns[i].node, alpha);
-        }
-        return;
+    if (view->spr_hover.active && !view->closing) {
+        /* Подсветка рамки: пересоздаём хром с интерполированным цветом
+         * ДО наложения масштаба (regen сбрасывает dest_size). */
+        effects_chrome_regen(view);
     }
 
+    double sc = view->spr_scale.current;
+    bool scaled = fabs(sc - 1.0) > 0.001;
+    const struct design_config *d = &view->server->design;
+
+    /* Хром: масштаб вокруг центра, в покое — естественный размер. */
+    double off_x = 0.0, off_y = 0.0;
+    if (view->chrome_buf != NULL) {
+        int cw = view->chrome_w, chh = view->chrome_h;
+        if (scaled && cw > 2 && chh > 2) {
+            int dw = (int)(cw * sc + 0.5);
+            int dh = (int)(chh * sc + 0.5);
+            if (dw < 1) {
+                dw = 1;
+            }
+            if (dh < 1) {
+                dh = 1;
+            }
+            wlr_scene_buffer_set_dest_size(view->chrome, dw, dh);
+            wlr_scene_node_set_position(&view->chrome->node,
+                                        (cw - dw) / 2.0, (chh - dh) / 2.0);
+            off_x = (double)(cw - dw) / 2.0;
+            off_y = (double)(chh - dh) / 2.0;
+        } else {
+            wlr_scene_buffer_set_dest_size(view->chrome, cw, chh);
+            wlr_scene_node_set_position(&view->chrome->node, 0, 0);
+        }
+        wlr_scene_buffer_set_opacity(view->chrome, alpha);
+    }
+
+    /* Контент клиента: масштаб синхронно с хромом. */
     if (view->content_buffer != NULL) {
+        int w = view->width, h = view->height;
+        if (scaled && w > 2 && h > 2) {
+            int dw = (int)(w * sc + 0.5);
+            int dh = (int)(h * sc + 0.5);
+            if (dw < 1) {
+                dw = 1;
+            }
+            if (dh < 1) {
+                dh = 1;
+            }
+            wlr_scene_buffer_set_dest_size(view->content_buffer, dw, dh);
+            wlr_scene_node_set_position(&view->content_buffer->node,
+                                        (w - dw) / 2.0, (h - dh) / 2.0);
+        } else {
+            wlr_scene_buffer_set_dest_size(view->content_buffer, 0, 0);
+            wlr_scene_node_set_position(&view->content_buffer->node, 0, 0);
+        }
         wlr_scene_buffer_set_opacity(view->content_buffer, alpha);
     }
 
-    if (view->spr_hover.active) {
-        /* Подсветка рамки: пересоздаём хром с интерполированным цветом. */
-        effects_chrome_regen(view);
+    /* Тень: масштабируется вместе с окном, в покое — естественный размер.
+     * Отдельно от хрома: при закрытии контент/хром могут быть уже NULL. */
+    if (scaled && view->chrome_w > 2 && view->chrome_h > 2) {
+        const int m = EFFECTS_SHADOW_MARGIN;
+        int nw = view->chrome_w + 2 * m;
+        int nh = view->chrome_h + 2 * m;
+        int sdw = (int)(nw * sc + 0.5);
+        int sdh = (int)(nh * sc + 0.5);
+        effects_shadow_place(view,
+                             (view->chrome_w - sdw) / 2,
+                             (view->chrome_h - sdh) / 2 +
+                                 (int)(EFFECTS_SHADOW_BIAS * sc),
+                             sdw, sdh, alpha);
+    } else {
+        effects_shadow_reset_alpha(view, alpha);
+    }
+
+    /* Кнопки: сжимаются вместе с окном (как при genie), в покое —
+     * натуральный размер. */
+    for (int i = 0; i < 3; i++) {
+        double bs = scaled ? sc : 1.0;
+        wlr_scene_node_set_position(&view->btns[i].node->node,
+                                    off_x + anim_btn_x(view, i) * bs,
+                                    off_y + anim_btn_y(view) * bs);
+        if (scaled) {
+            int bsz = (int)(d->btn_size * bs + 0.5);
+            if (bsz < 1) {
+                bsz = 1;
+            }
+            wlr_scene_buffer_set_dest_size(view->btns[i].node, bsz, bsz);
+        } else {
+            wlr_scene_buffer_set_dest_size(view->btns[i].node, 0, 0);
+        }
+        wlr_scene_buffer_set_opacity(view->btns[i].node, alpha);
     }
 }
 
@@ -134,6 +215,7 @@ static int animation_tick(void *data) {
         spring_step(&view->spr_slide, dt);
         spring_step(&view->spr_opacity, dt);
         spring_step(&view->spr_hover, dt);
+        spring_step(&view->spr_scale, dt);
         bool tform_settled = true;
         if (view->tform_active) {
             spring_step(&view->tform_spr, dt);
@@ -144,6 +226,7 @@ static int animation_tick(void *data) {
         if (!spring_settled(&view->spr_slide) ||
                 !spring_settled(&view->spr_opacity) ||
                 !spring_settled(&view->spr_hover) ||
+                !spring_settled(&view->spr_scale) ||
                 !tform_settled) {
             any_active = true;
             continue;
@@ -215,6 +298,8 @@ void view_effects_stop_anim(struct mywm_view *view) {
     view->spr_slide.active = false;
     view->spr_opacity.active = false;
     view->spr_hover.active = false;
+    view->spr_scale.active = false;
+    view->spr_scale.current = 1.0;
 }
 
 /*
@@ -230,6 +315,8 @@ void view_effects_open(struct mywm_view *view) {
                 server->animations_cfg.damping);
     spring_init(&view->spr_hover, EFFECTS_HOVER_STIFFNESS,
                 EFFECTS_HOVER_DAMPING);
+    spring_init(&view->spr_scale, server->animations_cfg.stiffness,
+                server->animations_cfg.damping);
     view->closing = false;
 
     if (!server->animations_cfg.enabled) {
@@ -243,8 +330,11 @@ void view_effects_open(struct mywm_view *view) {
 
     view->spr_opacity.current = 0.0;
     view->spr_slide.current = server->animations_cfg.open_slide;
+    /* Zoom как в macOS: окно раскрывается из slightly меньшего масштаба. */
+    view->spr_scale.current = EFFECTS_OPEN_SCALE;
     spring_set_target(&view->spr_opacity, 1.0);
     spring_set_target(&view->spr_slide, 0.0);
+    spring_set_target(&view->spr_scale, 1.0);
     apply_view_transforms(view);
     view_effects_start_anim(view);
     wlr_log(WLR_DEBUG, "open animation started: view=%p", (void *)view);
@@ -273,6 +363,11 @@ void view_effects_close(struct mywm_view *view) {
     spring_set_target(&view->spr_opacity, 0.0);
     spring_set_target(&view->spr_slide, -server->animations_cfg.close_slide);
     spring_set_target(&view->spr_hover, 0.0);
+    /* Лёгкое сжатие при растворении (zoom-out macOS). */
+    if (view->spr_scale.current >= 0.999) {
+        view->spr_scale.current = 1.0;
+    }
+    spring_set_target(&view->spr_scale, EFFECTS_CLOSE_SCALE);
     view_effects_start_anim(view);
     wlr_log(WLR_DEBUG, "close animation started: view=%p", (void *)view);
 }

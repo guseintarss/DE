@@ -24,8 +24,8 @@ mode = "cover"
 enabled = true
 stiffness = 170.0
 damping = 26.0
-open_slide = 14
-close_slide = 12
+open_slide = 8
+close_slide = 8
 
 # Горячие клавиши: "<модификаторы>+<keysym>" = действие.
 # Модификаторы: super, shift, ctrl, alt.

@@ -36,14 +36,8 @@
 /*
  * CPU-буфер под текст: память (memfd), которую рисует cairo и которую
  * рендерер импортирует как wl_shm-буфер (get_shm / data_ptr_access).
+ * Определение struct mywm_text_buf — в server.h.
  */
-struct mywm_text_buf {
-    struct wlr_buffer base;
-    int fd;
-    void *data;
-    size_t size;
-    size_t stride;
-};
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -172,6 +166,35 @@ static void bar_set_text(struct mywm_server *server,
         *slot = NULL;
     }
     *slot = nb;
+}
+
+/* Подпись для оболочки (меню приложений): буфер с белым текстом,
+ * высота по размеру шрифта. Освобождать через wlr_buffer_unlock. */
+struct mywm_text_buf *shell_label_buf(struct mywm_server *server,
+                                      const char *text, int px) {
+    int w = (int)bar_text_width(server, text, px,
+                                CAIRO_FONT_WEIGHT_NORMAL) + 12;
+    int h = px + 10;
+    struct mywm_text_buf *buf = text_buf_create(w, h);
+    if (buf == NULL) {
+        return NULL;
+    }
+    const float *color = server->design.bar_text;
+    cairo_surface_t *surf = cairo_image_surface_create_for_data(
+        buf->data, CAIRO_FORMAT_ARGB32, buf->base.width, buf->base.height,
+        (int)buf->stride);
+    cairo_t *cr = cairo_create(surf);
+    cairo_set_source_rgba(cr, color[0], color[1], color[2], color[3]);
+    cairo_select_font_face(cr, server->design.font, CAIRO_FONT_SLANT_NORMAL,
+                           CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, px);
+    cairo_text_extents_t e;
+    cairo_text_extents(cr, text, &e);
+    cairo_move_to(cr, 6, h / 2.0 - e.height / 2.0 - e.y_bearing);
+    cairo_show_text(cr, text);
+    cairo_destroy(cr);
+    cairo_surface_destroy(surf);
+    return buf;
 }
 
 /* Обрезает заголовок до BAR_APP_MAX_W с многоточием. */

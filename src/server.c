@@ -119,6 +119,11 @@ static void server_new_output(struct wl_listener *listener, void *data) {
     wl_list_insert(&server->outputs, &output->link);
     wlr_output_layout_add_auto(server->output_layout, wlr_output);
 
+    /* Оболочка привязана к layout: пересчитать док и менюбар под новый
+     * выход (dock_init/bar_init выполняются до появления мониторов). */
+    dock_refresh(server);
+    bar_update_name(server);
+
     wlr_log(WLR_INFO, "New output: %s (%dx%d)",
             wlr_output->name, wlr_output->width, wlr_output->height);
 }
@@ -156,7 +161,7 @@ static void server_new_virtual_keyboard(struct wl_listener *listener, void *data
     struct mywm_server *server =
         wl_container_of(listener, server, new_virtual_keyboard);
     struct wlr_virtual_keyboard_v1 *vk = data;
-    struct wlr_input_device *kb_device = wlr_virtual_keyboard_v1_get_input_device(vk);
+    struct wlr_input_device *kb_device = &vk->keyboard.base;
     if (kb_device) {
         server_new_keyboard(server, wlr_keyboard_from_input_device(kb_device));
         update_seat_caps(server);
@@ -167,7 +172,7 @@ static void server_new_virtual_pointer(struct wl_listener *listener, void *data)
     struct mywm_server *server =
         wl_container_of(listener, server, new_virtual_pointer);
     struct wlr_virtual_pointer_v1_new_pointer_event *event = data;
-    struct wlr_input_device *ptr_device = wlr_virtual_pointer_v1_get_input_device(event->new_pointer);
+    struct wlr_input_device *ptr_device = &event->new_pointer->pointer.base;
     if (ptr_device) {
         server_new_pointer(server, ptr_device);
         update_seat_caps(server);
@@ -270,6 +275,7 @@ void server_init(struct mywm_server *server) {
     xdg_shell_init(server);
     dock_init(server);
     bar_init(server);
+    apps_menu_init(server);
 
     server->new_output.notify = server_new_output;
     wl_signal_add(&server->backend->events.new_output, &server->new_output);

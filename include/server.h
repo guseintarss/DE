@@ -58,7 +58,13 @@ struct mywm_dock_item {
     /* Текущая (анимированная) и целевая геометрия в координатах
      * output layout. */
     double cw, ch, tw, th;
+    double vw;                     /* Скорость пружины размера */
     int lx, ly, lw, lh;
+    /* Закреплённый лаунчер: виден всегда (даже без окон), клик без
+     * запущенного приложения выполняет command. */
+    bool pinned;
+    char app_id[64];
+    char command[128];
 };
 
 struct mywm_dock {
@@ -66,12 +72,26 @@ struct mywm_dock {
     struct wlr_scene_tree *tree;
     struct wlr_scene_rect *bar;
     struct wlr_scene_rect *sep;
+    /* Разделитель между закреплёнными лаунчерами и окнами. */
+    struct wlr_scene_rect *sep_pin;
     struct wlr_scene_rect *dot;
     struct wl_list items;
     struct wl_event_source *anim_timer;
+    bool anim_running;             /* Идёт ли сейчас анимация дока */
+    struct timespec anim_last;     /* Время прошлого тика (для dt) */
+    /* Прямоугольник полосы дока в координатах layout (для fisheye). */
+    int bar_x, bar_y, bar_w, bar_h;
 };
 
-struct mywm_text_buf;
+/* CPU-буфер под текст (memfd + cairo), см. bar.c. */
+#include <wlr/interfaces/wlr_buffer.h>
+struct mywm_text_buf {
+    struct wlr_buffer base;
+    int fd;
+    void *data;
+    size_t size;
+    size_t stride;
+};
 struct mywm_chrome_buf;
 
 struct mywm_bar {
@@ -142,6 +162,8 @@ struct mywm_server {
 
     struct mywm_dock dock;
     struct mywm_bar bar;
+    /* Полноэкранное меню приложений (Launchpad), создаётся в apps_menu_init. */
+    struct mywm_apps_menu *apps_menu;
 
     struct wl_list outputs;
     struct wl_list views;
@@ -221,6 +243,12 @@ struct mywm_view {
     struct wlr_scene_buffer *chrome;
     struct mywm_chrome_buf *chrome_buf;
     int chrome_w, chrome_h;
+    /* Мягкая тень под окном (общая текстура, растягивается dest_size). */
+    struct wlr_scene_buffer *shadow;
+    /* Заголовок окна по центру тайтлбара (белый текст, shell_label_buf). */
+    struct wlr_scene_buffer *title_node;
+    struct mywm_text_buf *title_buf;
+    char *title_cache;
     /* Круглые кнопки в заголовке: 0=CLOSE, 1=MINIMIZE, 2=MAXIMIZE. */
     struct mywm_btn btns[3];
     /* Состояние окна: свёрнуто (узел отключён) / развёрнуто на весь layout. */
@@ -253,6 +281,7 @@ struct mywm_view {
     struct spring_anim spr_opacity;
     struct spring_anim spr_slide;
     struct spring_anim spr_hover;
+    struct spring_anim spr_scale;   /* Масштаб открытия/закрытия */
     bool anim_active;
     /* Анимация закрытия в процессе (финальный destroy отложен). */
     bool closing;
@@ -329,9 +358,30 @@ void dock_refresh(struct mywm_server *server);
 void dock_update(struct mywm_server *server);
 struct mywm_view *dock_icon_at(struct mywm_server *server,
                                double lx, double ly);
+/* Клик по дока-иконке: фокус существующего окна либо запуск закреплённого
+ * лаунчера. Возвращает true, если клик поглощён доком. */
+bool dock_activate_at(struct mywm_server *server, double lx, double ly);
 void dock_raise(struct mywm_server *server);
 /* Повторное применение [design] к доку. */
 void dock_redesign(struct mywm_server *server);
+
+/* --- keyboard.c --- */
+/* Запуск команды через fork/execvp (без шелла). */
+void mywm_spawn(struct mywm_server *server, const char *command);
+
+/* --- apps_menu.c --- */
+void apps_menu_init(struct mywm_server *server);
+void apps_menu_toggle(struct mywm_server *server);
+bool apps_menu_is_open(const struct mywm_server *server);
+void apps_menu_scroll(struct mywm_server *server, double delta);
+/* Клик при открытом меню: запуск приложения под курсором либо закрытие.
+ * Всегда поглощает клик (возвращает true). */
+bool apps_menu_click(struct mywm_server *server, double lx, double ly);
+
+/* --- bar.c --- */
+/* Текстовый буфер для подписей оболочки (меню приложений и т.п.). */
+struct mywm_text_buf *shell_label_buf(struct mywm_server *server,
+                                      const char *text, int px);
 
 /* --- icons.c --- */
 void icon_manager_init(struct mywm_icon_manager *mgr,
@@ -350,6 +400,13 @@ struct wlr_scene_buffer *icon_create_fallback(struct mywm_icon_manager *mgr,
                                                struct wlr_scene_tree *parent,
                                                int size,
                                                const float color[4]);
+struct wlr_scene_buffer *icon_create_launchpad(struct mywm_icon_manager *mgr,
+                                               struct wlr_scene_tree *parent,
+                                               int size);
+struct wlr_scene_buffer *icon_create_solid(struct mywm_icon_manager *mgr,
+                                           struct wlr_scene_tree *parent,
+                                           int w, int h,
+                                           const float color[4]);
 char **icon_get_available_themes(void);
 void icon_theme_list_free(char **themes);
 

@@ -26,6 +26,12 @@ deps = [
   dependency('fontconfig'),
 ]
 
+rsvg = dependency('librsvg-2.0', required: false)
+if rsvg.found()
+  deps += rsvg
+  add_project_arguments('-DHAVE_RSVG', language: 'c')
+endif
+
 xxd = find_program('xxd')
 wallpaper_data = custom_target('wallpaper_data',
   input: 'assets/wallpaper.png',
@@ -42,6 +48,7 @@ executable('DE',
   'src/config.c',
   'src/design.c',
   'src/dock.c',
+  'src/apps_menu.c',
   'src/bar.c',
   'src/animation.c',
   'src/effects.c',

@@ -134,6 +134,11 @@ static void spawn_command(struct mywm_server *server, const char *command) {
     _exit(127);
 }
 
+/* Публичная обёртка над spawn_command (клик по закреплённой иконке дока). */
+void mywm_spawn(struct mywm_server *server, const char *command) {
+    spawn_command(server, command);
+}
+
 static void binding_move_view(struct mywm_server *server, int dx, int dy) {
     struct mywm_view *view = server->focused_view;
     if (view == NULL || !view->mapped) {
@@ -280,6 +285,19 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
     uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
     bool is_repeat = keyboard_is_repeat(keyboard, event);
     bool handled = false;
+
+    /* Esc закрывает открытое меню приложений, клавиша не уходит клиенту. */
+    if (apps_menu_is_open(server) &&
+            event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        for (int i = 0; i < nsyms; i++) {
+            if (syms[i] == XKB_KEY_Escape) {
+                apps_menu_toggle(server);
+                handled = true;
+                break;
+            }
+        }
+    }
+
     if (nsyms > 0) {
         /* Ищем биндинг по модификаторам (через depressed, а не сырые коды)
          * и любому из символьных значений клавиши (с Shift символы меняются). */

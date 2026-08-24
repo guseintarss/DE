@@ -1,10 +1,14 @@
 #include "server.h"
 #include <stdlib.h>
+#include <string.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
+
+static void view_title_update(struct mywm_view *view);
+static void view_buttons_apply(struct mywm_view *view);
 
 /*
  * Размеры хрома привязаны к размеру содержимого окна (view->width/height),
@@ -23,6 +27,82 @@ static void update_decorations(struct mywm_view *view) {
     } else {
         wlr_scene_buffer_set_dest_size(view->chrome, cw, ch);
         wlr_scene_node_set_position(&view->chrome->node, 0, 0);
+        effects_shadow_reset_alpha(view, 1.0f);
+    }
+    view_title_update(view);
+}
+
+/* --- Заголовок окна в тайтлбаре (macOS): белый текст по центру. --- */
+#define TITLE_FONT_PX 12
+
+static void view_title_update(struct mywm_view *view) {
+    if (view->title_node == NULL || view->xdg_toplevel == NULL) {
+        return;
+    }
+    const char *title = view->xdg_toplevel->title;
+    if (title == NULL || title[0] == '\0') {
+        wlr_scene_node_set_enabled(&view->title_node->node, false);
+        return;
+    }
+    /* Перестраиваем буфер только при смене текста. */
+    if (view->title_cache == NULL ||
+            strcmp(view->title_cache, title) != 0) {
+        free(view->title_cache);
+        view->title_cache = strdup(title);
+        if (view->title_buf != NULL) {
+            wlr_buffer_unlock(&view->title_buf->base);
+            view->title_buf = NULL;
+        }
+        view->title_buf = shell_label_buf(view->server, title,
+                                          TITLE_FONT_PX);
+        if (view->title_buf != NULL) {
+            wlr_buffer_lock(&view->title_buf->base);
+            wlr_scene_buffer_set_buffer(view->title_node,
+                                        &view->title_buf->base);
+        }
+    }
+    if (view->title_buf == NULL) {
+        wlr_scene_node_set_enabled(&view->title_node->node, false);
+        return;
+    }
+    wlr_scene_node_set_enabled(&view->title_node->node, true);
+
+    /* Центр тайтлбара; не заезжаем на traffic lights слева. */
+    const struct design_config *d = &view->server->design;
+    int tw = view->title_buf->base.width;
+    int th = view->title_buf->base.height;
+    int btns_right = d->border + BTN_X +
+        3 * (d->btn_size + d->btn_gap);
+    int x = d->border + (view->width - tw) / 2;
+    if (x < btns_right) {
+        x = btns_right;
+    }
+    int y = d->border + (d->title_h - th) / 2;
+    if (y < 0) {
+        y = 0;
+    }
+    wlr_scene_node_set_position(&view->title_node->node, x, y);
+}
+
+/* --- Traffic lights: у несфокусированного окна точки серые (macOS). --- */
+static const float BTN_GRAY[4] = {0.78f, 0.78f, 0.80f, 1.0f};
+
+static void view_buttons_apply(struct mywm_view *view) {
+    struct design_config *d = &view->server->design;
+    bool focused = view->server->focused_view == view;
+    const float *cols[3] = {BTN_GRAY, BTN_GRAY, BTN_GRAY};
+    if (focused) {
+        cols[0] = d->btn_close;
+        cols[1] = d->btn_minimize;
+        cols[2] = d->btn_maximize;
+    }
+    for (int i = 0; i < 3; i++) {
+        mywm_btn_recreate(view->deco_tree, &view->btns[i], d->btn_size,
+                          cols[i], (enum mywm_title_button)(i + 1));
+        wlr_scene_node_set_position(
+            &view->btns[i].node->node,
+            d->border + BTN_X + i * (d->btn_size + d->btn_gap),
+            (d->title_h - d->btn_size) / 2);
     }
 }
 
@@ -65,6 +145,7 @@ void focus_view(struct mywm_server *server, struct mywm_view *view,
             struct mywm_view *prev_view = prev_tree->node.data;
             if (prev_view != NULL) {
                 effects_chrome_regen(prev_view);
+                view_buttons_apply(prev_view);
             }
         }
     }
@@ -74,6 +155,7 @@ void focus_view(struct mywm_server *server, struct mywm_view *view,
     wlr_xdg_toplevel_set_activated(view->xdg_toplevel, true);
     server->focused_view = view;
     effects_chrome_regen(view);
+    view_buttons_apply(view);
     dock_refresh(server);
     dock_raise(server);
     bar_raise(server);
@@ -295,6 +377,13 @@ void view_destroy_final(struct mywm_view *view) {
         server->hovered_view = NULL;
     }
     dock_remove_view(server, view);
+    /* Освобождаем CPU-ресурсы декораций; scene-ноды умрут вместе с деревьями. */
+    if (view->title_buf != NULL) {
+        wlr_buffer_unlock(&view->title_buf->base);
+        view->title_buf = NULL;
+    }
+    free(view->title_cache);
+    view->title_cache = NULL;
     /* scene_tree уничтожает wlroots (wlr_scene_xdg_surface) — здесь он
      * может быть уже уничтожен (view_scene_destroy_handler). */
     if (view->scene_tree != NULL) {
@@ -373,25 +462,22 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
                                              d->title_unfocused);
     wlr_scene_node_set_position(&view->deco_title->node, d->border, 0);
 
+    /* Мягкая тень — самая нижняя нода в дереве декораций. */
+    view->shadow = wlr_scene_buffer_create(view->deco_tree, NULL);
+
     /* Хром окна: одна CPU-текстура со скруглёнными углами поверх rect'ов
      * (эффекты.c). Нода создаётся пустой — текстуру зальёт
      * effects_chrome_regen по первому commit клиента. Кнопки и содержимое
      * создаются ниже, т.е. рендерятся поверх хрома. */
     view->chrome = wlr_scene_buffer_create(view->deco_tree, NULL);
 
-    /* Кнопки управления слева в заголовке (красная/жёлтая/зелёная),
-     * круглые как в macOS, с глифами при наведении. */
-    const float *btn_colors[3] = {d->btn_close, d->btn_minimize,
-                                  d->btn_maximize};
-    for (int i = 0; i < 3; i++) {
-        view->btns[i] = mywm_btn_create(
-            view->deco_tree, d->btn_size, btn_colors[i],
-            (enum mywm_title_button)(i + 1));
-        wlr_scene_node_set_position(
-            &view->btns[i].node->node,
-            d->border + BTN_X + i * (d->btn_size + d->btn_gap),
-            (d->title_h - d->btn_size) / 2);
-    }
+    /* Кнопки управления слева в заголовке (красная/жёлтая/зелёная):
+     * цветные у сфокусированного окна, серые у остальных (macOS). */
+    view_buttons_apply(view);
+
+    /* Заголовок окна по центру тайтлбара. */
+    view->title_node = wlr_scene_buffer_create(view->deco_tree, NULL);
+    wlr_scene_node_set_enabled(&view->title_node->node, false);
 
     view->scene_tree = wlr_scene_xdg_surface_create(view->deco_tree,
                                                     xdg_toplevel->base);

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "server.h"
 #include <drm_fourcc.h>
+#include <cairo.h>
 #include <math.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -161,6 +162,95 @@ static void chrome_draw(struct mywm_chrome_buf *cb, double radius,
  * активной трансформации пропускается: размеры ведёт анимация, а
  * финализация (effects_tform_finalize) пересоздаст хром сама.
  */
+
+/* --- Мягкая тень под окном (macOS) ---
+ * Одна общая текстура 256x256 с размытым скруглённым прямоугольником
+ * (слои расширяющихся заливок с падающей альфой — имитация gaussian),
+ * растягивается dest_size под размер окна + поля. */
+
+static struct mywm_chrome_buf *shadow_tex = NULL;
+
+static void shadow_round_path(cairo_t *cr, double x, double y,
+                              double w, double h, double r) {
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
+    cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
+    cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
+    cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
+    cairo_close_path(cr);
+}
+
+static void effects_shadow_ensure(void) {
+    if (shadow_tex != NULL) {
+        return;
+    }
+    const int S = 256;
+    const double inset = 56;
+    shadow_tex = chrome_buf_create(S, S);
+    if (shadow_tex == NULL) {
+        return;
+    }
+    cairo_surface_t *surf = cairo_image_surface_create_for_data(
+        shadow_tex->data, CAIRO_FORMAT_ARGB32, S, S,
+        (int)shadow_tex->stride);
+    cairo_t *cr = cairo_create(surf);
+    double x = inset, y = inset;
+    double w = S - 2 * inset, h = S - 2 * inset;
+    const int layers = 22;
+    for (int i = layers; i >= 1; i--) {
+        double inf = i * 1.7;
+        double t = (double)i / layers;
+        cairo_set_source_rgba(cr, 0.0, 0.0, 0.0,
+                              0.055 * (1.15 - t));
+        shadow_round_path(cr, x - inf, y - inf,
+                          w + 2 * inf, h + 2 * inf, 24 + inf * 0.7);
+        cairo_fill(cr);
+    }
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.20);
+    shadow_round_path(cr, x, y, w, h, 24);
+    cairo_fill(cr);
+    cairo_destroy(cr);
+    cairo_surface_destroy(surf);
+    /* Единственная ссылка живёт весь процесс (singleton). */
+    wlr_buffer_lock(&shadow_tex->base);
+}
+
+void effects_shadow_place(struct mywm_view *view, int dx, int dy,
+                          int dw, int dh, float alpha) {
+    if (view == NULL || view->shadow == NULL) {
+        return;
+    }
+    effects_shadow_ensure();
+    if (shadow_tex != NULL && view->shadow->buffer == NULL) {
+        wlr_scene_buffer_set_buffer(view->shadow, &shadow_tex->base);
+    }
+    if (dw < 1) {
+        dw = 1;
+    }
+    if (dh < 1) {
+        dh = 1;
+    }
+    wlr_scene_buffer_set_dest_size(view->shadow, dw, dh);
+    wlr_scene_node_set_position(&view->shadow->node, dx, dy);
+    if (alpha < 0.0f) {
+        alpha = 0.0f;
+    }
+    if (alpha > 1.0f) {
+        alpha = 1.0f;
+    }
+    wlr_scene_buffer_set_opacity(view->shadow, alpha);
+}
+
+void effects_shadow_reset_alpha(struct mywm_view *view, float alpha) {
+    if (view == NULL || view->chrome_w <= 0 || view->chrome_h <= 0) {
+        return;
+    }
+    const int m = EFFECTS_SHADOW_MARGIN;
+    effects_shadow_place(view, -m, -m + EFFECTS_SHADOW_BIAS,
+                         view->chrome_w + 2 * m,
+                         view->chrome_h + 2 * m, alpha);
+}
+
 /* Позиция кнопки i на заголовке окна (метрики из [design]). */
 static int view_btn_x(const struct mywm_view *view, int i) {
     const struct design_config *d = &view->server->design;
@@ -206,6 +296,7 @@ void effects_chrome_regen(struct mywm_view *view) {
     view->chrome_w = cw;
     view->chrome_h = ch;
     wlr_scene_buffer_set_dest_size(view->chrome, cw, ch);
+    effects_shadow_reset_alpha(view, 1.0f);
 }
 
 /*
@@ -225,6 +316,9 @@ void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind) {
     view->spr_hover.active = false;
     view->spr_opacity.active = false;
     view->spr_opacity.current = 1.0;
+    /* Zoom open/close не должен мешать трансформации. */
+    view->spr_scale.active = false;
+    view->spr_scale.current = 1.0;
 
     struct tform_geo a = {
         .x = view->x,
@@ -375,6 +469,17 @@ void effects_tform_apply(struct mywm_view *view) {
                                        (int)(d->btn_size * bs + 0.5));
         wlr_scene_buffer_set_opacity(view->btns[i].node, (float)op);
     }
+
+    /* Тень следует за масштабом окна (центр сохраняется). */
+    if (view->shadow != NULL && a->cw > 1 && a->ch > 1) {
+        const int m = EFFECTS_SHADOW_MARGIN;
+        double k = cw / a->cw;
+        int sdw = (int)((a->cw + 2 * m) * k + 0.5);
+        int sdh = (int)((a->ch + 2 * m) * k + 0.5);
+        int sx = (int)((a->cw - sdw) / 2.0);
+        int sy = (int)((a->ch - sdh) / 2.0 + EFFECTS_SHADOW_BIAS * p);
+        effects_shadow_place(view, sx, sy, sdw, sdh, (float)op);
+    }
 }
 
 /*
@@ -476,4 +581,5 @@ void effects_tform_cancel(struct mywm_view *view) {
                                     view_btn_y(view));
         wlr_scene_buffer_set_opacity(view->btns[i].node, 1.0f);
     }
+    effects_shadow_reset_alpha(view, 1.0f);
 }
