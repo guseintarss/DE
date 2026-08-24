@@ -1,4 +1,5 @@
 #include "server.h"
+#include <math.h>
 #include <stdlib.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_scene.h>
@@ -255,13 +256,13 @@ static void update_buttons_hover(struct mywm_server *server) {
     double cy = server->cursor->y;
     struct mywm_view *view = server->focused_view;
     for (int i = 0; i < 3; i++) {
-        bool over = false;
-        if (view != NULL && view->mapped && !view->maximized) {
-            over = title_button_at(view, cx, cy) == (enum mywm_title_button)(i + 1);
+        if (view == NULL || view->btns[i].node == NULL) {
+            continue;
         }
-        if (view != NULL) {
-            mywm_button_hover(&view->btns[i], over);
-        }
+        bool over = !view->maximized &&
+            title_button_at(view, cx, cy) ==
+                (enum mywm_title_button)(i + 1);
+        mywm_button_hover(&view->btns[i], over);
     }
     for (int i = 0; i < 3; i++) {
         bool over = bar_button_at(server, cx, cy) ==
@@ -282,6 +283,13 @@ static void process_cursor_motion(struct mywm_server *server, uint32_t time) {
     double sx, sy;
     struct wlr_seat *seat = server->seat;
     struct wlr_surface *surface = NULL;
+    /* Открытое меню приложений поглощает ввод: ховер по его ячейкам,
+     * окна под оверлеем не получают pointer-события. */
+    if (apps_menu_is_open(server)) {
+        apps_menu_motion(server, server->cursor->x, server->cursor->y);
+        wlr_seat_pointer_clear_focus(seat);
+        return;
+    }
     struct mywm_view *view = desktop_view_at(server,
             server->cursor->x, server->cursor->y, &surface, &sx, &sy);
     if (view == NULL) {
@@ -361,6 +369,8 @@ void begin_interactive(struct mywm_view *view,
         wlr_scene_node_coords(&view->deco_tree->node, &deco_x, &deco_y);
         server->grab_x = server->cursor->x - deco_x;
         server->grab_y = server->cursor->y - deco_y;
+        server->grab_start_x = server->cursor->x;
+        server->grab_start_y = server->cursor->y;
     } else {
         const struct design_config *d = &view->server->design;
         int content_x = view->x + d->border;
@@ -383,6 +393,48 @@ void begin_interactive(struct mywm_view *view,
 }
 
 /*
+ * GNOME edge tiling: бросил окно у левого/правого края — тайл на половину,
+ * у верхнего края — максимизация. Вызывается при завершении MOVE-жеста
+ * и только если окно реально перетаскивалось (иначе случайный клик у
+ * края тайлил окно без ведома пользователя).
+ */
+#define TILE_EDGE_PX 12
+#define TILE_DRAG_MIN_PX 24
+
+static void move_end_edge_actions(struct mywm_server *server) {
+    struct mywm_view *view = server->grabbed_view;
+    if (view == NULL || server->cursor_mode != MYWM_CURSOR_MOVE) {
+        return;
+    }
+    double dx = server->cursor->x - server->grab_start_x;
+    double dy = server->cursor->y - server->grab_start_y;
+    if (sqrt(dx * dx + dy * dy) < TILE_DRAG_MIN_PX) {
+        return;
+    }
+    const struct design_config *d = &server->design;
+    struct wlr_box box;
+    wlr_output_layout_get_box(server->output_layout, NULL, &box);
+    double cx = server->cursor->x;
+    double cy = server->cursor->y;
+    /* Учитываем точку под курсором И край самого окна. */
+    bool left = cx <= box.x + TILE_EDGE_PX ||
+        view->x <= box.x + 2;
+    bool right = cx >= box.x + box.width - TILE_EDGE_PX ||
+        view->x + view->width + 2 * d->border >=
+            box.x + box.width - 2;
+    bool top = cy <= box.y + d->menu_bar_h + TILE_EDGE_PX;
+    if (top && !left && !right) {
+        maximize_view(view);
+        return;
+    }
+    if (left) {
+        tile_view(view, 1);
+    } else if (right) {
+        tile_view(view, 2);
+    }
+}
+
+/*
  * Кнопка мыши: отпускание завершает move/resize (сброс в PASSTHROUGH).
  * Нажатие переключает фокус на view под курсором; при зажатом Super
  * дополнительно стартует перемещение окна.
@@ -396,6 +448,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     wlr_seat_pointer_notify_button(server->seat, event->time_msec,
                                    event->button, event->state);
     if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        move_end_edge_actions(server);
         reset_cursor_mode(server);
         return;
     }

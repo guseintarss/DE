@@ -18,6 +18,7 @@
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
 #include <wlr/util/log.h>
@@ -179,36 +180,6 @@ static void server_new_virtual_pointer(struct wl_listener *listener, void *data)
     }
 }
 
-static void find_headless_backend(struct wlr_backend *backend, void *data) {
-    if (wlr_backend_is_headless(backend)) {
-        *(struct wlr_backend **)data = backend;
-    }
-}
-
-static void add_headless_outputs(struct mywm_server *server) {
-    const char *headless_outputs = getenv("WLR_HEADLESS_OUTPUTS");
-    if (headless_outputs == NULL) {
-        return;
-    }
-    int count = atoi(headless_outputs);
-    if (count <= 0) {
-        return;
-    }
-    struct wlr_backend *headless = NULL;
-    if (wlr_backend_is_multi(server->backend)) {
-        wlr_multi_for_each_backend(server->backend, find_headless_backend, &headless);
-    } else if (wlr_backend_is_headless(server->backend)) {
-        headless = server->backend;
-    }
-    if (headless == NULL) {
-        wlr_log(WLR_ERROR, "WLR_HEADLESS_OUTPUTS set but no headless backend found");
-        return;
-    }
-    for (int i = 0; i < count; i++) {
-        wlr_headless_add_output(headless, 1280, 720);
-    }
-}
-
 /* SIGHUP: перечитать [design] и применить к живой сцене. */
 static int handle_sighup(int signal_number, void *data) {
     struct mywm_server *server = data;
@@ -232,7 +203,7 @@ void server_init(struct mywm_server *server) {
     server->renderer = wlr_renderer_autocreate(server->backend);
     wlr_renderer_init_wl_display(server->renderer, server->wl_display);
 
-    add_headless_outputs(server);
+    /* Выходы для headless-тестов создаёт сам wlroots из WLR_HEADLESS_OUTPUTS. */
 
     server->allocator = wlr_allocator_autocreate(server->backend, server->renderer);
     server->compositor = wlr_compositor_create(server->wl_display, 6,
@@ -273,6 +244,8 @@ void server_init(struct mywm_server *server) {
      * wlr-объекты и регистрируют listeners. */
     cursor_init(server);
     xdg_shell_init(server);
+    /* Скриншоты для отладки: grim-совместимые клиенты (wlr-screencopy). */
+    wlr_screencopy_manager_v1_create(server->wl_display);
     dock_init(server);
     bar_init(server);
     apps_menu_init(server);

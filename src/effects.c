@@ -148,11 +148,14 @@ static void chrome_draw(struct mywm_chrome_buf *cb, double radius,
             } else {
                 c = body;
             }
-            uint32_t v = ((uint32_t)(c[0] * a * 255.0 + 0.5) << 24) |
-                         ((uint32_t)(c[1] * a * 255.0 + 0.5) << 16) |
-                         ((uint32_t)(c[2] * a * 255.0 + 0.5) << 8) |
-                         (uint32_t)(c[3] * a * 255.0 + 0.5);
-            px[y * w + x] = v;
+            /* WL_SHM_FORMAT_ARGB8888: премультиплицированное A<<24 |
+             * R<<16 | G<<8 | B (младший байт — синий). RGB масштабируем
+             * на a (corner AA), альфа остаётся a. */
+            uint32_t A = (uint32_t)(c[3] * a * 255.0 + 0.5);
+            uint32_t R = (uint32_t)(c[0] * a * 255.0 + 0.5);
+            uint32_t G = (uint32_t)(c[1] * a * 255.0 + 0.5);
+            uint32_t B = (uint32_t)(c[2] * a * 255.0 + 0.5);
+            px[y * w + x] = (A << 24) | (R << 16) | (G << 8) | B;
         }
     }
 }
@@ -278,13 +281,22 @@ void effects_chrome_regen(struct mywm_view *view) {
     const float *title = view->server->focused_view == view ?
         d->title_focused : d->title_unfocused;
     float border[4];
-    double t = view->spr_hover.current;
-    for (int i = 0; i < 4; i++) {
-        border[i] = d->window_border[i] +
-            (d->border_hover[i] - d->window_border[i]) * t;
+    if (view->maximized) {
+        /* Максимизация: рамка растворяется, роль заголовка играет
+         * верхний менюбар (имя приложения и кнопки уже там). */
+        border[0] = border[1] = border[2] = 0.0f;
+        border[3] = 0.0f;
+    } else {
+        double t = view->spr_hover.current;
+        for (int i = 0; i < 4; i++) {
+            border[i] = d->window_border[i] +
+                (d->border_hover[i] - d->window_border[i]) * t;
+        }
     }
-    chrome_draw(nb, EFFECTS_CORNER_RADIUS,
-                border, title, d->window_body, d->border, d->title_h);
+    /* В maximized углы прямые: окно сливается с краями экрана. */
+    double radius = view->maximized ? 0.0 : EFFECTS_CORNER_RADIUS;
+    chrome_draw(nb, radius, border, title, d->window_body,
+                view->maximized ? 0 : d->border, d->title_h);
 
     wlr_buffer_lock(&nb->base);
     wlr_buffer_drop(&nb->base);
@@ -457,10 +469,18 @@ void effects_tform_apply(struct mywm_view *view) {
     bool genie = view->tform_kind == TFORM_GENIE_IN ||
         view->tform_kind == TFORM_GENIE_OUT;
     const struct design_config *d = &view->server->design;
-    double bs = genie ? (cw / a->cw) : 1.0;
-    double bx0 = (a->cw - cw) / 2.0 + view_btn_x(view, 0);
-    double by0 = (a->ch - ch) / 2.0 + view_btn_y(view);
+    /* Эталон масштаба кнопок: полный размер окна. Для GENIE_IN это a
+     * (стартуем большими), для GENIE_OUT — b (приходим к большим);
+     * иначе при разворачивании из дока bs рос до full/min и кнопки
+     * раздувались к концу анимации. */
+    double ref_cw = view->tform_kind == TFORM_GENIE_OUT ? b->cw : a->cw;
+    double bs = genie && ref_cw > 1 ? (cw / ref_cw) : 1.0;
+    double bx0 = (a->cw - cw) / 2.0 + view_btn_x(view, 0) * bs;
+    double by0 = (a->ch - ch) / 2.0 + view_btn_y(view) * bs;
     for (int i = 0; i < 3; i++) {
+        if (view->btns[i].node == NULL) {
+            continue;
+        }
         wlr_scene_node_set_position(&view->btns[i].node->node,
                                     bx0 + i *
                                         (d->btn_size + d->btn_gap) * bs, by0);
@@ -470,12 +490,21 @@ void effects_tform_apply(struct mywm_view *view) {
         wlr_scene_buffer_set_opacity(view->btns[i].node, (float)op);
     }
 
-    /* Тень следует за масштабом окна (центр сохраняется). */
+    /* Заголовок следует за трансформацией (масштаб только у genie). */
+    if (genie) {
+        view_title_apply_anim(view, bs, (a->cw - cw) / 2.0,
+                              (a->ch - ch) / 2.0, (float)op);
+    } else {
+        view_title_reset_anim(view, (float)op);
+    }
+
+    /* Тень следует за окном с ПОСТОЯННЫМИ полями: расчёт от текущих
+     * анимированных cw/ch (умножение на k=cw/a->cw взорвало бы тень
+     * при genie-out, где k достигает полного/свёрнутого размера). */
     if (view->shadow != NULL && a->cw > 1 && a->ch > 1) {
         const int m = EFFECTS_SHADOW_MARGIN;
-        double k = cw / a->cw;
-        int sdw = (int)((a->cw + 2 * m) * k + 0.5);
-        int sdh = (int)((a->ch + 2 * m) * k + 0.5);
+        int sdw = (int)(cw + 2 * m + 0.5);
+        int sdh = (int)(ch + 2 * m + 0.5);
         int sx = (int)((a->cw - sdw) / 2.0);
         int sy = (int)((a->ch - sdh) / 2.0 + EFFECTS_SHADOW_BIAS * p);
         effects_shadow_place(view, sx, sy, sdw, sdh, (float)op);
@@ -534,6 +563,9 @@ void effects_tform_finalize(struct mywm_view *view) {
         wlr_scene_buffer_set_opacity(view->content_buffer, 1.0f);
     }
     for (int i = 0; i < 3; i++) {
+        if (view->btns[i].node == NULL) {
+            continue;
+        }
         wlr_scene_buffer_set_dest_size(view->btns[i].node, 0, 0);
         wlr_scene_node_set_position(&view->btns[i].node->node,
                                     view_btn_x(view, i),
@@ -541,6 +573,7 @@ void effects_tform_finalize(struct mywm_view *view) {
         wlr_scene_buffer_set_opacity(view->btns[i].node, 1.0f);
     }
     effects_chrome_regen(view);
+    view_title_reset_anim(view, 1.0f);
     view->tform_active = false;
 
     if (kind == TFORM_GENIE_OUT) {
@@ -575,6 +608,9 @@ void effects_tform_cancel(struct mywm_view *view) {
         wlr_scene_buffer_set_opacity(view->content_buffer, 1.0f);
     }
     for (int i = 0; i < 3; i++) {
+        if (view->btns[i].node == NULL) {
+            continue;
+        }
         wlr_scene_buffer_set_dest_size(view->btns[i].node, 0, 0);
         wlr_scene_node_set_position(&view->btns[i].node->node,
                                     view_btn_x(view, i),
@@ -582,4 +618,5 @@ void effects_tform_cancel(struct mywm_view *view) {
         wlr_scene_buffer_set_opacity(view->btns[i].node, 1.0f);
     }
     effects_shadow_reset_alpha(view, 1.0f);
+    view_title_reset_anim(view, 1.0f);
 }

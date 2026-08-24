@@ -1,8 +1,10 @@
+#define _GNU_SOURCE
 #include "server.h"
 #include <cairo.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -16,8 +18,11 @@
 /*
  * Полноэкранное меню приложений (Launchpad): тёмный оверлей поверх рабочего
  * стола с сеткой иконок и подписей. Список строится из .desktop-файлов
- * XDG-каталогов при каждом открытии. Колесо — прокрутка страниц, клик по
- * иконке — запуск, клик мимо / Esc / повторный клик по пину — закрытие.
+ * XDG-каталогов при каждом открытии. Приложения, не влезающие в сетку,
+ * образуют страницы: колесо/клик по точкам перелистывает их с анимацией
+ * «книжного» переворота (сжатие к вертикальному корешку по центру сетки).
+ * Клик по иконке — запуск, клик мимо / Esc / повторный клик по пину —
+ * закрытие.
  */
 
 #define APPS_MAX 256
@@ -29,6 +34,20 @@
 #define APPS_FADE_IN_S 0.18    /* Появление оверлея */
 #define APPS_FADE_OUT_S 0.12   /* Быстрое растворение при закрытии */
 #define APPS_FADE_MS 16
+#define APPS_HOVER_SCALE 0.14  /* Прибавка масштаба иконки под курсором */
+#define APPS_HOVER_LIFT 6      /* Подъём иконки, px */
+#define APPS_PILL_ALPHA 0.10   /* Альфа пилюли-подсветки */
+#define APPS_FLIP_S 0.42       /* Длительность перелистывания, с */
+#define APPS_FLIP_MS 16
+#define APPS_FLIP_MIN_SX 0.12  /* Остаточная ширина страницы у корешка */
+#define APPS_FLIP_OUT_A 0.28   /* Альфа уходящей страницы в конце */
+#define APPS_DOT_STEP 16       /* Шаг точек-индикатора страниц */
+#define APPS_DOT_R 4.0         /* Радиус точки */
+#define APPS_SCROLL_THRESHOLD 1.5 /* Накопленная дельта для листания */
+#define APPS_SCROLL_IDLE_S 0.35   /* Пауза сбрасывает накопление */
+#define APPS_SWIPE_GAIN 4.0    /* Пиксели пальца -> доли страницы */
+#define APPS_SWIPE_END_MS 140  /* Тишина = свайп закончен */
+#define APPS_SWIPE_RUBBER 0.3  /* Жёсткость «резины» за краями */
 
 struct app_entry {
     char *name;
@@ -43,6 +62,10 @@ struct apps_cell {
     struct wlr_scene_buffer *label_node;
     struct mywm_text_buf *label_buf;
     int lx, ly, lw, lh;
+    int page;                      /* Страница, на которой лежит ячейка */
+    /* Ховер: hs — текущий прогресс 0..1 (0 нет, 1 под курсором),
+     * ht — целевое значение; анимируются в hover_tick. */
+    float hs, ht;
 };
 
 struct mywm_apps_menu {
@@ -50,6 +73,36 @@ struct mywm_apps_menu {
     struct wlr_scene_tree *tree;
     /* Фон — текстура (не scene_rect): у буфера есть opacity для фейда. */
     struct wlr_scene_buffer *bg;
+    /* Пилюля-подсветка под ячейкой, на которой курсор. */
+    struct wlr_scene_buffer *hover_bg;
+    struct mywm_text_buf *hover_tex;
+    struct apps_cell *hover_cell;
+    float pill_a;                  /* текущая альфа пилюли 0..1 */
+    int pill_w, pill_h;
+    double hov_last;
+    struct wl_event_source *hov_timer;
+    /* Постраничный режим: страница, их число, ячеек на страницу. */
+    int page, pages, per_page;
+    /* Анимация перелистывания: from -> to с прогрессом flip_t 0..1.
+     * flip_pending — страница, запрошенная колесом во время анимации. */
+    bool flipping;
+    int flip_dir;                  /* +1 вперёд, -1 назад */
+    int flip_from, flip_to, flip_pending;
+    double flip_t, flip_last;
+    struct wl_event_source *flip_timer;
+    /* Накопитель колеса: страница листается, когда сумма дельт
+     * превышает порог; пауза сбрасывает сумму. */
+    double scroll_acc, scroll_last;
+    /* Свайп двумя пальцами: страницы тянутся за пальцем, при
+     * остановке — доводка до ближайшей страницы анимацией. */
+    bool swiping;
+    int swipe_base;                /* Страница, от которой тянем */
+    double swipe_off;              /* Смещение в долях страницы */
+    struct wl_event_source *swipe_timer;
+    /* Точки-индикаторы страниц под сеткой. */
+    struct wlr_scene_buffer *dots;
+    struct mywm_text_buf *dots_tex;
+    int dots_x, dots_y, dots_w, dots_h;
     struct wl_list cells;
     size_t count;
     bool open;
@@ -192,9 +245,43 @@ static void cells_destroy(struct mywm_apps_menu *m) {
         entry_clear(&cell->app);
         free(cell);
     }
+    if (m->hover_bg != NULL) {
+        wlr_scene_node_destroy(&m->hover_bg->node);
+        m->hover_bg = NULL;
+    }
+    if (m->hover_tex != NULL) {
+        wlr_buffer_unlock(&m->hover_tex->base);
+        m->hover_tex = NULL;
+    }
+    m->hover_cell = NULL;
+    m->pill_a = 0.0f;
+    m->hov_last = 0.0;
     m->count = 0;
-    m->scroll = 0;
+    /* Сброс постраничного состояния. */
+    if (m->flip_timer != NULL) {
+        wl_event_source_timer_update(m->flip_timer, 0);
+    }
+    m->flipping = false;
+    m->page = 0;
+    m->pages = 0;
+    m->per_page = 0;
+    m->flip_t = 0.0;
+    m->flip_pending = -1;
+    m->scroll_acc = 0.0;
+    m->scroll_last = 0.0;
+    if (m->dots != NULL) {
+        wlr_scene_node_destroy(&m->dots->node);
+        m->dots = NULL;
+    }
+    if (m->dots_tex != NULL) {
+        wlr_buffer_unlock(&m->dots_tex->base);
+        m->dots_tex = NULL;
+    }
+    m->dots_w = 0;
+    m->dots_h = 0;
 }
+
+static void hover_apply_alpha(struct mywm_apps_menu *m);
 
 /* Применяет текущую прозрачность к фону и всем видимым ячейкам.
  * ВАЖНО: wlr_scene_buffer_set_opacity принимает float 0..1. */
@@ -209,6 +296,9 @@ static void menu_apply_fade(struct mywm_apps_menu *m) {
     if (m->bg != NULL) {
         wlr_scene_buffer_set_opacity(m->bg, alpha);
     }
+    if (m->dots != NULL && m->dots->node.enabled) {
+        wlr_scene_buffer_set_opacity(m->dots, alpha);
+    }
     struct apps_cell *cell;
     wl_list_for_each(cell, &m->cells, link) {
         if (!cell->icon_node->node.enabled) {
@@ -219,6 +309,9 @@ static void menu_apply_fade(struct mywm_apps_menu *m) {
             wlr_scene_buffer_set_opacity(cell->label_node, alpha);
         }
     }
+    /* Пилюля живёт в той же альфе фейда. */
+    struct mywm_apps_menu *mm = m;
+    hover_apply_alpha(mm);
 }
 
 static void menu_fade_start(struct mywm_apps_menu *m, int dir) {
@@ -269,33 +362,383 @@ static int menu_fade_tick(void *data) {
     return 0;
 }
 
-/* Перескладка видимых строк под текущий scroll. */
-static void menu_relayout(struct mywm_apps_menu *m) {    int i = 0;
+/* --- Ховер ячеек: пилюля-подсветка + масштаб/подъём иконки --- */
+
+/* Применяет прогресс ховера s (0..1) к геометрии иконки ячейки. */
+static void cell_apply_hover(struct apps_cell *cell, float s) {
+    if (!cell->icon_node->node.enabled) {
+        return;
+    }
+    double sc = 1.0 + APPS_HOVER_SCALE * s;
+    int size = (int)(APPS_ICON * sc + 0.5);
+    wlr_scene_buffer_set_dest_size(cell->icon_node, size, size);
+    int lift = (int)(-APPS_HOVER_LIFT * s + 0.5);
+    /* Позиция из relayout + центрирование увеличенной иконки. */
+    int base_x = cell->lx + (APPS_CELL_W - APPS_ICON) / 2;
+    int grow = (size - APPS_ICON) / 2;
+    wlr_scene_node_set_position(&cell->icon_node->node,
+                                base_x - grow, cell->ly - grow + lift);
+}
+
+/* Ставит пилюлю под текущую hovered-ячейку. */
+static void hover_pill_place(struct mywm_apps_menu *m) {
+    if (m->hover_bg == NULL) {
+        return;
+    }
+    struct apps_cell *c = m->hover_cell;
+    if (c == NULL || !c->icon_node->node.enabled) {
+        wlr_scene_node_set_enabled(&m->hover_bg->node, false);
+        return;
+    }
+    wlr_scene_node_set_enabled(&m->hover_bg->node, true);
+    wlr_scene_node_set_position(&m->hover_bg->node, c->lx + 9, c->ly + 4);
+}
+
+/* Альфа пилюли = фейд меню * собственная анимация появления. */
+static void hover_apply_alpha(struct mywm_apps_menu *m) {
+    if (m->hover_bg != NULL) {
+        float a = (float)(m->fade * m->pill_a);
+        if (a < 0.0f) a = 0.0f;
+        if (a > 1.0f) a = 1.0f;
+        wlr_scene_buffer_set_opacity(m->hover_bg, a);
+    }
+}
+
+/* Тик: экспоненциальное сближение hs->ht у всех анимируемых ячеек и
+ * альфы пилюли; таймер останавливается, когда всё сошлось. */
+static int hover_tick(void *data) {
+    struct mywm_apps_menu *m = data;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double now = (double)ts.tv_sec + ts.tv_nsec / 1e9;
+    double dt = 1.0 / 60.0;
+    if (m->hov_last > 0.0) {
+        dt = now - m->hov_last;
+        if (dt < 0.0) dt = 0.0;
+        if (dt > 0.05) dt = 0.05;
+    }
+    m->hov_last = now;
+
+    double k = dt * 14.0;
+    if (k > 1.0) k = 1.0;
+    bool busy = false;
+
     struct apps_cell *cell;
     wl_list_for_each(cell, &m->cells, link) {
-        int col = i % m->cols;
-        int row = i / m->cols;
-        int vis_row = row - m->scroll;
-        bool visible = vis_row >= 0 && vis_row < m->rows_visible;
-        wlr_scene_node_set_enabled(&cell->icon_node->node, visible);
-        if (cell->label_node != NULL) {
-            wlr_scene_node_set_enabled(&cell->label_node->node, visible);
+        if (cell->hs == cell->ht) {
+            continue;
         }
+        cell->hs += (float)((cell->ht - cell->hs) * k);
+        if (cell->hs < 0.002f && cell->ht == 0.0f) cell->hs = 0.0f;
+        if (cell->hs > 0.998f && cell->ht == 1.0f) cell->hs = 1.0f;
+        cell_apply_hover(cell, cell->hs);
+        busy |= cell->hs != cell->ht;
+    }
+
+    float pt = m->hover_cell != NULL ? 1.0f : 0.0f;
+    if (m->pill_a != pt) {
+        m->pill_a += (float)((pt - m->pill_a) * k);
+        if (m->pill_a < 0.004f && pt == 0.0f) m->pill_a = 0.0f;
+        if (m->pill_a > 0.996f && pt == 1.0f) m->pill_a = 1.0f;
+        hover_apply_alpha(m);
+        hover_pill_place(m);
+        busy |= m->pill_a != pt;
+    }
+
+    if (!busy && m->hov_timer != NULL) {
+        wl_event_source_timer_update(m->hov_timer, 0);
+        m->hov_last = 0.0;
+    } else if (busy) {
+        wl_event_source_timer_update(m->hov_timer, APPS_FADE_MS);
+    }
+    return 0;
+}
+
+static void hover_kick(struct mywm_apps_menu *m) {
+    if (m->hov_timer != NULL) {
+        wl_event_source_timer_update(m->hov_timer, 1);
+    }
+}
+
+/* Мгновенный сброс ховера (перед перелистыванием): пока страницы
+ * летят, тик ховера не должен трогать геометрию иконок. */
+static void hover_hard_reset(struct mywm_apps_menu *m) {
+    struct apps_cell *cell;
+    wl_list_for_each(cell, &m->cells, link) {
+        cell->hs = 0.0f;
+        cell->ht = 0.0f;
+    }
+    m->hover_cell = NULL;
+    m->pill_a = 0.0f;
+    hover_apply_alpha(m);
+    if (m->hov_timer != NULL) {
+        wl_event_source_timer_update(m->hov_timer, 0);
+    }
+    m->hov_last = 0.0;
+}
+
+/* Базовая геометрия ячейки (без ховера и переворота). */
+static void cell_place_base(struct apps_cell *cell) {
+    wlr_scene_buffer_set_dest_size(cell->icon_node, APPS_ICON, APPS_ICON);
+    wlr_scene_node_set_position(&cell->icon_node->node,
+                                cell->lx +
+                                    (APPS_CELL_W - APPS_ICON) / 2,
+                                cell->ly);
+    if (cell->label_node != NULL && cell->label_buf != NULL) {
+        wlr_scene_node_set_position(
+            &cell->label_node->node,
+            cell->lx + (APPS_CELL_W -
+                        (int)cell->label_buf->base.width) / 2,
+            cell->ly + APPS_ICON + 4);
+    }
+}
+
+/* --- Перелистывание страниц «как книга» --- */
+
+static void flip_start(struct mywm_apps_menu *m, int dir, int target);
+static void dots_update(struct mywm_apps_menu *m);
+
+/* Искажение ячейки в полёте: s — горизонтальное сжатие к корешку
+ * (вертикальная ось по центру сетки), slide — сдвиг по X, alpha —
+ * множитель прозрачности поверх фейда меню. Высота не меняется —
+ * вращение вокруг вертикальной оси её сохраняет. */
+static void flip_apply_cell(struct mywm_apps_menu *m, struct apps_cell *c,
+                            double sx, double alpha, double slide) {
+    double ax = m->grid_x + (double)m->cols * APPS_CELL_W / 2.0;
+    float op = (float)(m->fade * alpha);
+    if (op < 0.0f) op = 0.0f;
+    if (op > 1.0f) op = 1.0f;
+    /* Иконка. */
+    double cx = c->lx + APPS_CELL_W / 2.0;
+    double ncx = ax + (cx - ax) * sx + slide;
+    int iw = (int)(APPS_ICON * sx + 0.5);
+    if (iw < 2) {
+        iw = 2;
+    }
+    wlr_scene_buffer_set_dest_size(c->icon_node, iw, APPS_ICON);
+    wlr_scene_node_set_position(&c->icon_node->node,
+                                (int)(ncx - iw / 2.0 + 0.5), c->ly);
+    wlr_scene_buffer_set_opacity(c->icon_node, op);
+    /* Подпись сжимается тем же коэффициентом вокруг той же оси. */
+    if (c->label_node != NULL && c->label_buf != NULL) {
+        double lw = (double)c->label_buf->base.width;
+        double nlw = lw * sx;
+        if (nlw < 2.0) {
+            nlw = 2.0;
+        }
+        double ncx2 = ax + (cx - ax) * sx + slide;
+        wlr_scene_buffer_set_dest_size(c->label_node, (int)(nlw + 0.5),
+                                       (int)c->label_buf->base.height);
+        wlr_scene_node_set_position(&c->label_node->node,
+                                    (int)(ncx2 - nlw / 2.0 + 0.5),
+                                    c->ly + APPS_ICON + 4);
+        wlr_scene_buffer_set_opacity(c->label_node, op);
+    }
+}
+
+/* Применяет фазу переворота p (0..1) к обеим страницам: уходящая
+ * сжимается к корешку и уходит против направления, приходящая
+ * разворачивается из-за корешка по ходу движения. */
+static void flip_apply(struct mywm_apps_menu *m, double p) {
+    double ei = p * p;                       /* ease-in квадрикой */
+    double q = 1.0 - p;
+    double eo = 1.0 - q * q * q;             /* ease-out кубом */
+    double s_out = 1.0 - (1.0 - APPS_FLIP_MIN_SX) * ei;
+    double a_out = 1.0 - (1.0 - APPS_FLIP_OUT_A) * ei;
+    double s_in = APPS_FLIP_MIN_SX + (1.0 - APPS_FLIP_MIN_SX) * eo;
+    double a_in = APPS_FLIP_OUT_A + (1.0 - APPS_FLIP_OUT_A) * p;
+    double swing = (double)m->cols * APPS_CELL_W * 0.22;
+    double sl_out = -swing * ei * m->flip_dir;
+    double sl_in = swing * (1.0 - eo) * m->flip_dir;
+    struct apps_cell *cell;
+    wl_list_for_each(cell, &m->cells, link) {
+        if (!cell->icon_node->node.enabled) {
+            continue;
+        }
+        if (cell->page == m->flip_from) {
+            flip_apply_cell(m, cell, s_out, a_out, sl_out);
+        } else if (cell->page == m->flip_to) {
+            flip_apply_cell(m, cell, s_in, a_in, sl_in);
+        }
+    }
+}
+
+static void menu_apply_page(struct mywm_apps_menu *m);
+
+/* Завершение переворота: страница фиксируется, уходящие ячейки гасятся,
+ * индикатор точек перерисовывается; при наличии очереди колеса —
+ * следующий переворот. */
+static void flip_finish(struct mywm_apps_menu *m) {
+    m->flipping = false;
+    m->page = m->flip_to;
+    menu_apply_page(m);
+    dots_update(m);
+    if (m->flip_timer != NULL) {
+        wl_event_source_timer_update(m->flip_timer, 0);
+    }
+    if (m->flip_pending >= 0 && m->flip_pending != m->page) {
+        int target = m->flip_pending;
+        m->flip_pending = -1;
+        flip_start(m, target > m->page ? 1 : -1, target);
+    } else {
+        m->flip_pending = -1;
+    }
+}
+
+/* Тик анимации перелистывания. */
+static int flip_tick(void *data) {
+    struct mywm_apps_menu *m = data;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double now = (double)ts.tv_sec + ts.tv_nsec / 1e9;
+    double dt = 1.0 / 60.0;
+    if (m->flip_last > 0.0) {
+        dt = now - m->flip_last;
+        if (dt < 0.0) dt = 0.0;
+        if (dt > 0.05) dt = 0.05;
+    }
+    m->flip_last = now;
+
+    m->flip_t += dt / APPS_FLIP_S;
+    if (m->flip_t >= 1.0) {
+        flip_finish(m);
+        return 0;
+    }
+    flip_apply(m, m->flip_t);
+    wl_event_source_timer_update(m->flip_timer, APPS_FLIP_MS);
+    return 0;
+}
+
+/* Старт переворота на страницу target (dir — направление жеста). */
+static void flip_start(struct mywm_apps_menu *m, int dir, int target) {
+    if (target < 0 || target >= m->pages || target == m->page) {
+        return;
+    }
+    hover_hard_reset(m);
+    m->flipping = true;
+    m->flip_dir = dir;
+    m->flip_from = m->page;
+    m->flip_to = target;
+    m->page = target;
+    m->flip_t = 0.0;
+    m->flip_last = 0.0;
+    /* Обе страницы должны быть видны до первого тика. */
+    struct apps_cell *cell;
+    wl_list_for_each(cell, &m->cells, link) {
+        bool vis = cell->page == m->flip_from ||
+                   cell->page == m->flip_to;
+        wlr_scene_node_set_enabled(&cell->icon_node->node, vis);
+        if (cell->label_node != NULL) {
+            wlr_scene_node_set_enabled(&cell->label_node->node, vis);
+        }
+    }
+    if (m->flip_timer != NULL) {
+        wl_event_source_timer_update(m->flip_timer, 1);
+    }
+}
+
+/* --- Точки-индикаторы страниц --- */
+
+/* Пересоздаёт полосу точек под сеткой: текущая страница ярче.
+ * node/tex уничтожаются и строятся заново — буфер у scene_buffer
+ * подменить нельзя. */
+static void dots_update(struct mywm_apps_menu *m) {
+    if (m->dots != NULL) {
+        wlr_scene_node_destroy(&m->dots->node);
+        m->dots = NULL;
+    }
+    if (m->dots_tex != NULL) {
+        wlr_buffer_unlock(&m->dots_tex->base);
+        m->dots_tex = NULL;
+    }
+    m->dots_w = 0;
+    m->dots_h = 0;
+    if (m->pages <= 1) {
+        return;
+    }
+    int w = m->pages * APPS_DOT_STEP;
+    int h = (int)(APPS_DOT_R * 2.0) + 4;
+    struct mywm_text_buf *tex = shell_blank_buf(w, h);
+    if (tex == NULL) {
+        return;
+    }
+    cairo_surface_t *ds = cairo_image_surface_create_for_data(
+        tex->data, CAIRO_FORMAT_ARGB32, w, h, (int)tex->stride);
+    cairo_t *dc = cairo_create(ds);
+    for (int i = 0; i < m->pages; i++) {
+        cairo_new_sub_path(dc);
+        cairo_arc(dc, i * APPS_DOT_STEP + APPS_DOT_STEP / 2.0, h / 2.0,
+                  APPS_DOT_R, 0, 2 * M_PI);
+        cairo_set_source_rgba(dc, 1.0, 1.0, 1.0,
+                              i == m->page ? 0.95 : 0.30);
+        cairo_fill(dc);
+    }
+    cairo_destroy(dc);
+    cairo_surface_destroy(ds);
+    m->dots_tex = tex;
+    m->dots = wlr_scene_buffer_create(m->tree, &tex->base);
+    if (m->dots == NULL) {
+        wlr_buffer_unlock(&tex->base);
+        m->dots_tex = NULL;
+        return;
+    }
+    m->dots_w = w;
+    m->dots_h = h;
+    m->dots_x = m->grid_x +
+                (m->cols * APPS_CELL_W - w) / 2;
+    m->dots_y = m->grid_top + m->rows_visible * m->cell_h + 10;
+    wlr_scene_buffer_set_opacity(m->dots, (float)m->fade);
+    wlr_scene_node_set_position(&m->dots->node, m->dots_x, m->dots_y);
+}
+
+/* Показывает только ячейки текущей страницы в базовой геометрии. */
+static void menu_apply_page(struct mywm_apps_menu *m) {
+    struct apps_cell *cell;
+    wl_list_for_each(cell, &m->cells, link) {
+        bool vis = cell->page == m->page;
+        wlr_scene_node_set_enabled(&cell->icon_node->node, vis);
+        if (cell->label_node != NULL) {
+            wlr_scene_node_set_enabled(&cell->label_node->node, vis);
+        }
+        if (vis) {
+            cell_place_base(cell);
+        }
+    }
+    if (m->hover_cell != NULL &&
+            m->hover_cell->page != m->page) {
+        m->hover_cell = NULL;
+    }
+}
+
+/* Раскладка ячеек по страницам: позиции внутри страницы, номер
+ * страницы, счётчики; затем показ текущей страницы. */
+static void menu_relayout(struct mywm_apps_menu *m) {
+    size_t i = 0;
+    struct apps_cell *cell;
+    wl_list_for_each(cell, &m->cells, link) {
+        int col = (int)(i % (size_t)m->cols);
+        size_t row = i / (size_t)m->cols;
+        cell->page = (int)(row / (size_t)m->rows_visible);
+        int vis_row = (int)(row % (size_t)m->rows_visible);
         cell->lx = m->grid_x + col * APPS_CELL_W;
         cell->ly = m->grid_top + vis_row * m->cell_h;
-        wlr_scene_node_set_position(&cell->icon_node->node,
-                                    cell->lx +
-                                        (APPS_CELL_W - APPS_ICON) / 2,
-                                    cell->ly);
-        if (cell->label_node != NULL && cell->label_buf != NULL) {
-            wlr_scene_node_set_position(
-                &cell->label_node->node,
-                cell->lx + (APPS_CELL_W -
-                            cell->label_buf->base.width) / 2,
-                cell->ly + APPS_ICON + 4);
-        }
         i++;
     }
+    m->per_page = m->cols * m->rows_visible;
+    m->pages = (int)((m->count + (size_t)m->per_page - 1) /
+                     (size_t)m->per_page);
+    if (m->pages < 1) {
+        m->pages = 1;
+    }
+    if (m->page >= m->pages) {
+        m->page = m->pages - 1;
+    }
+    if (m->page < 0) {
+        m->page = 0;
+    }
+    menu_apply_page(m);
 }
 
 void apps_menu_init(struct mywm_server *server) {
@@ -311,6 +754,9 @@ void apps_menu_init(struct mywm_server *server) {
     struct wl_event_loop *loop =
         wl_display_get_event_loop(server->wl_display);
     m->fade_timer = wl_event_loop_add_timer(loop, menu_fade_tick, m);
+    m->hov_timer = wl_event_loop_add_timer(loop, hover_tick, m);
+    m->flip_timer = wl_event_loop_add_timer(loop, flip_tick, m);
+    m->flip_pending = -1;
     server->apps_menu = m;
     wlr_scene_node_set_enabled(&m->tree->node, false);
 }
@@ -322,7 +768,20 @@ void apps_menu_toggle(struct mywm_server *server) {
     }
     if (m->open) {
         m->open = false;
-        menu_fade_start(m, -1);
+        /* Перелистывание посреди анимации — мгновенно доводим до
+         * целевой страницы, чтобы фейд не затирал альфы полёта. */
+        if (m->flipping) {
+            m->flip_t = 1.0;
+            flip_finish(m);
+        }
+        if (m->fade_timer != NULL) {
+            menu_fade_start(m, -1);
+        } else {
+            /* Таймер недоступен — мгновенное закрытие, иначе is_open
+             * застрянет true и меню будет поглощать весь ввод. */
+            wlr_scene_node_set_enabled(&m->tree->node, false);
+            cells_destroy(m);
+        }
         return;
     }
 
@@ -377,6 +836,49 @@ void apps_menu_toggle(struct mywm_server *server) {
         m->rows_visible = 1;
     }
 
+    /* Пилюля-подсветка ховера: создаётся ДО ячеек — рендерится под
+     * иконками, но над фоном. */
+    m->pill_w = APPS_CELL_W - 18;
+    m->pill_h = m->cell_h - 24;
+    if (m->hover_bg != NULL) {
+        wlr_scene_node_destroy(&m->hover_bg->node);
+        m->hover_bg = NULL;
+    }
+    if (m->hover_tex != NULL) {
+        wlr_buffer_unlock(&m->hover_tex->base);
+        m->hover_tex = NULL;
+    }
+    m->hover_tex = shell_blank_buf(m->pill_w, m->pill_h);
+    if (m->hover_tex != NULL) {
+        cairo_surface_t *ps = cairo_image_surface_create_for_data(
+            m->hover_tex->data, CAIRO_FORMAT_ARGB32, m->pill_w, m->pill_h,
+            (int)m->hover_tex->stride);
+        cairo_t *pc = cairo_create(ps);
+        double pr = 14.0;
+        double pw = m->pill_w, ph = m->pill_h;
+        cairo_move_to(pc, pr, 0);
+        cairo_line_to(pc, pw - pr, 0);
+        cairo_arc(pc, pw - pr, pr, pr, -M_PI / 2, 0);
+        cairo_line_to(pc, pw, ph - pr);
+        cairo_arc(pc, pw - pr, ph - pr, pr, 0, M_PI / 2);
+        cairo_line_to(pc, pr, ph);
+        cairo_arc(pc, pr, ph - pr, pr, M_PI / 2, M_PI);
+        cairo_line_to(pc, 0, pr);
+        cairo_arc(pc, pr, pr, pr, M_PI, 3 * M_PI / 2);
+        cairo_close_path(pc);
+        cairo_set_source_rgba(pc, 1.0, 1.0, 1.0, APPS_PILL_ALPHA);
+        cairo_fill(pc);
+        cairo_destroy(pc);
+        cairo_surface_destroy(ps);
+
+        m->hover_bg = wlr_scene_buffer_create(m->tree, &m->hover_tex->base);
+        if (m->hover_bg != NULL) {
+            wlr_scene_node_set_enabled(&m->hover_bg->node, false);
+        }
+    }
+    m->hover_cell = NULL;
+    m->pill_a = 0.0f;
+
     for (size_t idx = 0; idx < count; idx++) {
         struct apps_cell *cell = calloc(1, sizeof(*cell));
         if (cell == NULL) {
@@ -399,11 +901,15 @@ void apps_menu_toggle(struct mywm_server *server) {
         m->count++;
     }
 
-    m->scroll = 0;
+    m->page = 0;
+    m->flip_pending = -1;
     m->open = true;
     wlr_scene_node_set_enabled(&m->tree->node, true);
     wlr_scene_node_raise_to_top(&m->tree->node);
     menu_relayout(m);
+    dots_update(m);
+    /* Курсор мог уже стоять над ячейкой — показываем ховер сразу. */
+    apps_menu_motion(server, server->cursor->x, server->cursor->y);
     /* Анимация появления. */
     if (m->fade_dir == 0) {
         m->fade = 0.0;
@@ -420,34 +926,102 @@ bool apps_menu_is_open(const struct mywm_server *server) {
     return m != NULL && (m->open || m->fade_dir == -1);
 }
 
+/* Колесо мыши — листание страниц. Чтобы случайное касание или один
+ * «щелчок» не листали страницу, дельты копятся в scroll_acc и листание
+ * происходит при превышении порога; пауза дольше APPS_SCROLL_IDLE_S
+ * сбрасывает накопление. Во время анимации запрос запоминается. */
 void apps_menu_scroll(struct mywm_server *server, double delta) {
     struct mywm_apps_menu *m = server->apps_menu;
     if (m == NULL || !m->open || delta == 0.0) {
         return;
     }
-    size_t total_rows = (m->count + (size_t)m->cols - 1) / (size_t)m->cols;
-    int max_scroll = (int)total_rows - m->rows_visible;
-    if (max_scroll < 0) {
-        max_scroll = 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double now = (double)ts.tv_sec + ts.tv_nsec / 1e9;
+    if (now - m->scroll_last > APPS_SCROLL_IDLE_S) {
+        m->scroll_acc = 0.0;
     }
-    int step = delta > 0 ? 1 : -1;
-    int next = m->scroll + step;
-    if (next < 0) {
-        next = 0;
+    m->scroll_last = now;
+    m->scroll_acc += delta;
+
+    if (fabs(m->scroll_acc) < APPS_SCROLL_THRESHOLD) {
+        return;
     }
-    if (next > max_scroll) {
-        next = max_scroll;
+    int dir = m->scroll_acc > 0 ? 1 : -1;
+    m->scroll_acc = 0.0;
+
+    if (m->flipping) {
+        /* Копим намерение от последнего запрошенного листания. */
+        int base = m->flip_pending >= 0 ? m->flip_pending : m->flip_to;
+        int next = base + dir;
+        if (next < 0) {
+            next = 0;
+        }
+        if (next >= m->pages) {
+            next = m->pages - 1;
+        }
+        m->flip_pending = next;
+        return;
     }
-    if (next != m->scroll) {
-        m->scroll = next;
-        menu_relayout(m);
+    flip_start(m, dir, m->page + dir);
+}
+
+/* Движение курсора над открытым меню: выбор ячейки под курсором и
+ * переключение ховера. Координаты — глобальные (layout), как в click. */
+void apps_menu_motion(struct mywm_server *server, double lx, double ly) {
+    struct mywm_apps_menu *m = server->apps_menu;
+    if (m == NULL || !m->open || m->flipping) {
+        return;
     }
+    struct apps_cell *pick = NULL;
+    struct apps_cell *cell;
+    wl_list_for_each(cell, &m->cells, link) {
+        if (!cell->icon_node->node.enabled) {
+            continue;
+        }
+        if (lx >= cell->lx && lx < cell->lx + APPS_CELL_W &&
+                ly >= cell->ly && ly < cell->ly + m->cell_h - 16) {
+            pick = cell;
+            break;
+        }
+    }
+    if (pick == m->hover_cell) {
+        return;
+    }
+    if (m->hover_cell != NULL) {
+        m->hover_cell->ht = 0.0f;
+    }
+    m->hover_cell = pick;
+    if (pick != NULL) {
+        pick->ht = 1.0f;
+        hover_pill_place(m);
+    }
+    hover_kick(m);
 }
 
 bool apps_menu_click(struct mywm_server *server, double lx, double ly) {
     struct mywm_apps_menu *m = server->apps_menu;
     if (m == NULL || !m->open) {
         return false;
+    }
+    if (m->flipping) {
+        return true; /* Во время переворота клики игнорируем. */
+    }
+    /* Клик по точкам-индикаторам — прыжок на страницу. */
+    if (m->pages > 1 && m->dots_w > 0 &&
+            ly >= m->dots_y - 6 && ly < m->dots_y + m->dots_h + 6 &&
+            lx >= m->dots_x - 6 && lx < m->dots_x + m->dots_w + 6) {
+        int idx = (int)((lx - m->dots_x) / APPS_DOT_STEP);
+        if (idx < 0) {
+            idx = 0;
+        }
+        if (idx >= m->pages) {
+            idx = m->pages - 1;
+        }
+        if (idx != m->page) {
+            flip_start(m, idx > m->page ? 1 : -1, idx);
+        }
+        return true;
     }
     struct apps_cell *cell;
     wl_list_for_each(cell, &m->cells, link) {

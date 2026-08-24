@@ -163,6 +163,9 @@ static void apply_view_transforms(struct mywm_view *view) {
     /* Кнопки: сжимаются вместе с окном (как при genie), в покое —
      * натуральный размер. */
     for (int i = 0; i < 3; i++) {
+        if (view->btns[i].node == NULL) {
+            continue;
+        }
         double bs = scaled ? sc : 1.0;
         wlr_scene_node_set_position(&view->btns[i].node->node,
                                     off_x + anim_btn_x(view, i) * bs,
@@ -177,6 +180,13 @@ static void apply_view_transforms(struct mywm_view *view) {
             wlr_scene_buffer_set_dest_size(view->btns[i].node, 0, 0);
         }
         wlr_scene_buffer_set_opacity(view->btns[i].node, alpha);
+    }
+
+    /* Заголовок масштабируется и гаснет вместе с окном. */
+    if (scaled) {
+        view_title_apply_anim(view, sc, off_x, off_y, alpha);
+    } else {
+        view_title_reset_anim(view, alpha);
     }
 }
 

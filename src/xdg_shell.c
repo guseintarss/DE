@@ -1,4 +1,5 @@
 #include "server.h"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wlr/types/wlr_buffer.h>
@@ -32,8 +33,71 @@ static void update_decorations(struct mywm_view *view) {
     view_title_update(view);
 }
 
-/* --- Заголовок окна в тайтлбаре (macOS): белый текст по центру. --- */
+/* --- Заголовок окна в тайтлбаре (Adwaita): полужирный, по центру. --- */
 #define TITLE_FONT_PX 12
+
+/* Естественная позиция заголовка (центр тайтлбара). */
+static void view_title_natural_pos(const struct mywm_view *view,
+                                   int *x, int *y) {
+    const struct design_config *d = &view->server->design;
+    int tw = view->title_buf != NULL ? view->title_buf->base.width : 0;
+    int th = view->title_buf != NULL ? view->title_buf->base.height : 0;
+    *x = d->border + (view->width - tw) / 2;
+    *y = d->border + (d->title_h - th) / 2;
+    if (*y < 0) {
+        *y = 0;
+    }
+}
+
+void view_title_apply_anim(struct mywm_view *view, double bs,
+                           double off_x, double off_y, float alpha) {
+    if (view == NULL || view->title_node == NULL ||
+            view->title_buf == NULL) {
+        return;
+    }
+    int tw = view->title_buf->base.width;
+    int th = view->title_buf->base.height;
+    int dw = (int)(tw * bs + 0.5);
+    int dh = (int)(th * bs + 0.5);
+    if (dw < 1) {
+        dw = 1;
+    }
+    if (dh < 1) {
+        dh = 1;
+    }
+    int nx, ny;
+    view_title_natural_pos(view, &nx, &ny);
+    wlr_scene_buffer_set_dest_size(view->title_node, dw, dh);
+    wlr_scene_node_set_position(&view->title_node->node,
+                                off_x + nx * bs, off_y + ny * bs);
+    if (alpha < 0.0f) {
+        alpha = 0.0f;
+    }
+    if (alpha > 1.0f) {
+        alpha = 1.0f;
+    }
+    wlr_scene_buffer_set_opacity(view->title_node, alpha);
+    wlr_scene_node_set_enabled(&view->title_node->node, true);
+}
+
+void view_title_reset_anim(struct mywm_view *view, float alpha) {
+    if (view == NULL || view->title_node == NULL ||
+            view->title_buf == NULL) {
+        return;
+    }
+    int nx, ny;
+    view_title_natural_pos(view, &nx, &ny);
+    wlr_scene_buffer_set_dest_size(view->title_node, 0, 0);
+    wlr_scene_node_set_position(&view->title_node->node, nx, ny);
+    if (alpha < 0.0f) {
+        alpha = 0.0f;
+    }
+    if (alpha > 1.0f) {
+        alpha = 1.0f;
+    }
+    wlr_scene_buffer_set_opacity(view->title_node, alpha);
+    wlr_scene_node_set_enabled(&view->title_node->node, true);
+}
 
 static void view_title_update(struct mywm_view *view) {
     if (view->title_node == NULL || view->xdg_toplevel == NULL) {
@@ -53,8 +117,10 @@ static void view_title_update(struct mywm_view *view) {
             wlr_buffer_unlock(&view->title_buf->base);
             view->title_buf = NULL;
         }
-        view->title_buf = shell_label_buf(view->server, title,
-                                          TITLE_FONT_PX);
+        /* Adwaita: полужирный заголовок по центру хедера. */
+        view->title_buf = shell_label_buf_weight(view->server, title,
+                                                 TITLE_FONT_PX,
+                                                 CAIRO_FONT_WEIGHT_BOLD);
         if (view->title_buf != NULL) {
             wlr_buffer_lock(&view->title_buf->base);
             wlr_scene_buffer_set_buffer(view->title_node,
@@ -67,35 +133,22 @@ static void view_title_update(struct mywm_view *view) {
     }
     wlr_scene_node_set_enabled(&view->title_node->node, true);
 
-    /* Центр тайтлбара; не заезжаем на traffic lights слева. */
-    const struct design_config *d = &view->server->design;
-    int tw = view->title_buf->base.width;
-    int th = view->title_buf->base.height;
-    int btns_right = d->border + BTN_X +
-        3 * (d->btn_size + d->btn_gap);
-    int x = d->border + (view->width - tw) / 2;
-    if (x < btns_right) {
-        x = btns_right;
+    /* Геометрия — через общий reset (учитывает mid-zoom коммиты). */
+    if (view->anim_active &&
+            fabs(view->spr_scale.current - 1.0) > 0.001) {
+        /* Окно в процессе zoom-анимации: геометрию ведёт тик,
+         * чтобы заголовок не мигал между натуральным и масштабом. */
+        view_title_apply_anim(view, view->spr_scale.current, 0, 0, 1.0f);
+    } else {
+        view_title_reset_anim(view, 1.0f);
     }
-    int y = d->border + (d->title_h - th) / 2;
-    if (y < 0) {
-        y = 0;
-    }
-    wlr_scene_node_set_position(&view->title_node->node, x, y);
 }
 
-/* --- Traffic lights: у несфокусированного окна точки серые (macOS). --- */
-static const float BTN_GRAY[4] = {0.78f, 0.78f, 0.80f, 1.0f};
+/* --- Кнопки управления окном (traffic lights, слева как в macOS). --- */
 
 static void view_buttons_apply(struct mywm_view *view) {
     struct design_config *d = &view->server->design;
-    bool focused = view->server->focused_view == view;
-    const float *cols[3] = {BTN_GRAY, BTN_GRAY, BTN_GRAY};
-    if (focused) {
-        cols[0] = d->btn_close;
-        cols[1] = d->btn_minimize;
-        cols[2] = d->btn_maximize;
-    }
+    const float *cols[3] = {d->btn_close, d->btn_minimize, d->btn_maximize};
     for (int i = 0; i < 3; i++) {
         mywm_btn_recreate(view->deco_tree, &view->btns[i], d->btn_size,
                           cols[i], (enum mywm_title_button)(i + 1));
@@ -242,6 +295,63 @@ void maximize_view(struct mywm_view *view) {
 }
 
 /*
+ * GNOME-тайлинг: side 1 — левая половина layout, 2 — правая, 0 —
+ * восстановить исходную геометрию. Геометрия до первого тайла
+ * запоминается в save_*; повторный тайл на ту же сторону разворачивает.
+ */
+void tile_view(struct mywm_view *view, int side) {
+    if (view == NULL || !view->mapped || view->closing ||
+            view->tform_active) {
+        return;
+    }
+    struct mywm_server *server = view->server;
+    const struct design_config *d = &server->design;
+    if (server->grabbed_view == view) {
+        reset_cursor_mode(server);
+    }
+    if (side == 0 && view->tiled_side == 0 && !view->maximized) {
+        /* Восстанавливать нечего. */
+        return;
+    }
+    if (view->maximized) {
+        /* Из максимизации сразу в тайл: текущая геометрия не сохраняем. */
+        view->maximized = false;
+        if (side == 0) {
+            wlr_xdg_toplevel_set_size(view->xdg_toplevel,
+                                      view->save_w, view->save_h);
+            effects_view_set_position(view, view->save_x, view->save_y);
+            bar_update_name(server);
+            return;
+        }
+    } else if (view->tiled_side == 0 && !view->maximized && side != 0) {
+        view->save_x = view->x;
+        view->save_y = view->y;
+        view->save_w = view->width;
+        view->save_h = view->height;
+    }
+
+    view->tiled_side = side;
+    if (side == 0) {
+        wlr_xdg_toplevel_set_size(view->xdg_toplevel,
+                                  view->save_w, view->save_h);
+        effects_view_set_position(view, view->save_x, view->save_y);
+    } else {
+        struct wlr_box box;
+        wlr_output_layout_get_box(server->output_layout, NULL, &box);
+        int half_w = box.width / 2 - 2 * d->border;
+        int h = box.height - d->menu_bar_h - d->title_h - d->border;
+        int x = side == 1 ? box.x : box.x + box.width / 2;
+        wlr_xdg_toplevel_set_size(view->xdg_toplevel, half_w, h);
+        effects_view_set_position(view, x, box.y + d->menu_bar_h);
+        if (server->focused_view == view) {
+            effects_chrome_regen(view);
+        }
+    }
+    bar_update_name(server);
+    wlr_log(WLR_DEBUG, "tile_view: view=%p side=%d", (void *)view, side);
+}
+
+/*
  * map: view стала видимой. Никаких операций со списком — link уже в списке
  * с момента создания (new_toplevel). Позиция восстанавливается из view->x/y.
  */
@@ -318,6 +428,14 @@ static void xdg_toplevel_commit_handler(struct wl_listener *listener, void *data
     view->width = base->geometry.width;
     view->height = base->geometry.height;
     update_decorations(view);
+    /* app_id/title приходят после создания: разово привязываем док. */
+    if (!view->dock_resolved) {
+        const char *aid = view->xdg_toplevel->app_id;
+        if (aid != NULL && aid[0] != '\0') {
+            view->dock_resolved = true;
+            dock_resolve_view(view->server, view, aid);
+        }
+    }
     /* Содержимое клиента: первый buffer-ребёнок scene_tree. Появляется
      * только после первого commit клиента. */
     if (view->content_buffer == NULL) {

@@ -22,8 +22,8 @@ mode = "cover"
 # close_slide — сдвиг вверх при закрытии (px).
 [animations]
 enabled = true
-stiffness = 170.0
-damping = 26.0
+stiffness = 100.0
+damping = 15.0
 open_slide = 8
 close_slide = 8
 
@@ -66,7 +66,7 @@ close_slide = 8
 # dock_icon / dock_padding / dock_gap — иконки, отступы и зазор дока.
 [design]
 font = "SF Pro Display"
-border = 4
+border = 2
 title_height = 28
 button_size = 11
 button_gap = 6
@@ -75,11 +75,12 @@ dock_icon = 48
 dock_padding = 8
 dock_gap = 6
 
-color_window_border   = "#05050DFF"
-color_window_body     = "#212630FF"
-color_title_focused   = "#6B8CBFFF"
-color_title_unfocused = "#4C576BFF"
-color_border_hover    = "#5973A6FF"
+# Окна в стиле GNOME Adwaita (dark): тёмный хедер, волосяная тёмная рамка
+color_window_border   = "#101012FF"
+color_window_body     = "#1E1E20FF"
+color_title_focused   = "#363638FF"
+color_title_unfocused = "#28282AFF"
+color_border_hover    = "#3A3A3CFF"
 
 color_btn_close    = "#FF5E57FF"
 color_btn_minimize = "#FFBD2EFF"

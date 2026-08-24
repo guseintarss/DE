@@ -6,6 +6,7 @@
 #include "effects.h"
 #include "wallpaper.h"
 #include "icons.h"
+#include <cairo.h>
 #include <time.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
@@ -183,6 +184,9 @@ struct mywm_server {
      * в координатах layout на момент начала жеста. */
     enum mywm_cursor_mode cursor_mode;
     struct mywm_view *grabbed_view;
+    /* Курсор в начале MOVE-жеста: отличаем клик от перетаскивания
+     * (edge-tiling срабатывает только при реальном переносе). */
+    double grab_start_x, grab_start_y;
     double grab_x, grab_y;
     struct wlr_box grab_geobox;
     uint32_t resize_edges;
@@ -254,6 +258,10 @@ struct mywm_view {
     /* Состояние окна: свёрнуто (узел отключён) / развёрнуто на весь layout. */
     bool minimized;
     bool maximized;
+    /* GNOME-тайлинг: 0 — нет, 1 — левая половина, 2 — правая. */
+    int tiled_side;
+    /* dock_resolve_view выполнен (app_id получен, иконка/пин привязаны). */
+    bool dock_resolved;
     /* Геометрия до максимизации (deco-позиция и размер содержимого). */
     int save_x, save_y, save_w, save_h;
     struct wl_listener map;
@@ -344,6 +352,8 @@ void focus_view(struct mywm_server *server, struct mywm_view *view,
 void close_view(struct mywm_view *view);
 void minimize_view(struct mywm_view *view);
 void maximize_view(struct mywm_view *view);
+/* GNOME-тайлинг: side 1=левая половина, 2=правая, 0=вернуть как было. */
+void tile_view(struct mywm_view *view, int side);
 /* Финальное освобождение view (вызывается после анимации закрытия). */
 void view_destroy_final(struct mywm_view *view);
 
@@ -353,6 +363,9 @@ void view_destroy_final(struct mywm_view *view);
 /* --- dock.c --- */
 void dock_init(struct mywm_server *server);
 void dock_add_view(struct mywm_server *server, struct mywm_view *view);
+/* Привязка окна к пину / догрузка иконки, когда клиент прислал app_id. */
+void dock_resolve_view(struct mywm_server *server, struct mywm_view *view,
+                       const char *app_id);
 void dock_remove_view(struct mywm_server *server, struct mywm_view *view);
 void dock_refresh(struct mywm_server *server);
 void dock_update(struct mywm_server *server);
@@ -377,11 +390,16 @@ void apps_menu_scroll(struct mywm_server *server, double delta);
 /* Клик при открытом меню: запуск приложения под курсором либо закрытие.
  * Всегда поглощает клик (возвращает true). */
 bool apps_menu_click(struct mywm_server *server, double lx, double ly);
+void apps_menu_motion(struct mywm_server *server, double lx, double ly);
 
 /* --- bar.c --- */
 /* Текстовый буфер для подписей оболочки (меню приложений и т.п.). */
 struct mywm_text_buf *shell_label_buf(struct mywm_server *server,
                                       const char *text, int px);
+struct mywm_text_buf *shell_blank_buf(int width, int height);
+struct mywm_text_buf *shell_label_buf_weight(struct mywm_server *server,
+                                             const char *text, int px,
+                                             cairo_font_weight_t weight);
 
 /* --- icons.c --- */
 void icon_manager_init(struct mywm_icon_manager *mgr,
@@ -422,10 +440,19 @@ enum mywm_title_button bar_button_at(struct mywm_server *server,
 /* Круглая кнопка: буфер с закрашенным кругом и (опционально) глифом. */
 struct mywm_text_buf *mywm_button_buf(int size, const float color[4],
                                       enum mywm_title_button glyph);
-/* Полный набор кнопки: узел + оба буфера, начальное состояние — круг. */
+struct mywm_text_buf *mywm_button_buf_fg(int size, const float bg[4],
+                                         enum mywm_title_button glyph,
+                                         const float fg[4]);
+/* Полный набор кнопки: узел + оба буфера, начальное состояние — круг.
+ * Вариант _h позволяет задать фон/цвет глифа при наведении (Adwaita). */
 struct mywm_btn mywm_btn_create(struct wlr_scene_tree *parent, int size,
                                 const float color[4],
                                 enum mywm_title_button glyph_btn);
+struct mywm_btn mywm_btn_create_h(struct wlr_scene_tree *parent, int size,
+                                  const float color[4],
+                                  enum mywm_title_button glyph_btn,
+                                  const float hover_bg[4],
+                                  const float hover_fg[4]);
 /* Переключает узел кнопки между глифом и обычным кругом. */
 void mywm_button_hover(struct mywm_btn *btn, bool hovered);
 /* Пересоздаёт кнопку с новыми цветом/размером ([design] reload).

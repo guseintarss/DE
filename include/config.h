@@ -22,6 +22,11 @@ enum binding_action {
     BIND_ACTION_RESIZE_DOWN,
     BIND_ACTION_RESIZE_LEFT,
     BIND_ACTION_RESIZE_RIGHT,
+    /* GNOME-стиль управления окном: тайлинг к половинам и максимизация. */
+    BIND_ACTION_TILE_LEFT,      /* Super+Left: левая половина */
+    BIND_ACTION_TILE_RIGHT,     /* Super+Right: правая половина */
+    BIND_ACTION_VIEW_MAXIMIZE,  /* Super+Up: максимизация */
+    BIND_ACTION_VIEW_RESTORE,   /* Super+Down: восстановить/свернуть */
 };
 
 struct keybinding {

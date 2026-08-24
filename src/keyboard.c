@@ -232,6 +232,33 @@ static void run_binding(struct mywm_server *server,
     case BIND_ACTION_RESIZE_RIGHT:
         binding_resize_view(server, RESIZE_STEP, 0);
         break;
+    case BIND_ACTION_TILE_LEFT:
+    case BIND_ACTION_TILE_RIGHT:
+    case BIND_ACTION_VIEW_MAXIMIZE:
+    case BIND_ACTION_VIEW_RESTORE: {
+        struct mywm_view *fv = server->focused_view;
+        if (fv == NULL || !fv->mapped) {
+            break;
+        }
+        if (binding->action == BIND_ACTION_TILE_LEFT) {
+            tile_view(fv, 1);
+        } else if (binding->action == BIND_ACTION_TILE_RIGHT) {
+            tile_view(fv, 2);
+        } else if (binding->action == BIND_ACTION_VIEW_MAXIMIZE) {
+            maximize_view(fv);
+        } else if (fv->tiled_side != 0 || fv->maximized) {
+            /* GNOME: Super+Down разворачивает обратно, потом сворачивает. */
+            if (fv->tiled_side != 0) {
+                tile_view(fv, 0);
+            }
+            if (fv->maximized) {
+                maximize_view(fv);
+            }
+        } else {
+            minimize_view(fv);
+        }
+        break;
+    }
     }
 }
 

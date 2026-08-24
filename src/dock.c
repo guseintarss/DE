@@ -404,8 +404,64 @@ void dock_init(struct mywm_server *server) {
     dock_refresh(server);
 }
 
-void dock_add_view(struct mywm_server *server, struct mywm_view *view) {
-    const struct design_config *d = &server->design;
+/*
+ * app_id у клиента появляется ПОСЛЕ создания toplevel (set_app_id в
+ * первом commit). Тогда: окно с пустым app_id попало в док отдельным
+ * пунктом с fallback-квадратом. Здесь довязываем: если app_id совпал
+ * с закреплённым лаунчером — привязываем окно к пину (дубликат удаляем),
+ * иначе перезагружаем иконку пункта по настоящему app_id.
+ */
+void dock_resolve_view(struct mywm_server *server, struct mywm_view *view,
+                       const char *app_id) {
+    if (app_id == NULL || app_id[0] == '\0') {
+        return;
+    }
+    struct mywm_dock_item *it = NULL, *pin = NULL, *tmp;
+    wl_list_for_each(tmp, &server->dock.items, link) {
+        if (tmp->view == view && !tmp->pinned) {
+            it = tmp;
+        }
+    }
+    if (it == NULL) {
+        return;
+    }
+    wl_list_for_each(tmp, &server->dock.items, link) {
+        if (tmp->pinned && tmp->view == NULL &&
+                strcasecmp(tmp->app_id, app_id) == 0) {
+            pin = tmp;
+            break;
+        }
+    }
+    if (pin != NULL) {
+        /* Дубликат больше не нужен: окно живёт на пине. */
+        if (it->icon_img != NULL) {
+            wlr_scene_node_destroy(&it->icon_img->node);
+        }
+        if (it->icon != NULL) {
+            wlr_scene_node_destroy(&it->icon->node);
+        }
+        wl_list_remove(&it->link);
+        free(it);
+        pin->view = view;
+        dock_refresh(server);
+        wlr_log(WLR_INFO, "dock: view attached to pin '%s'", app_id);
+        return;
+    }
+    /* Не пин — просто подтягиваем настоящую иконку. */
+    if (it->icon_img != NULL) {
+        wlr_scene_node_destroy(&it->icon_img->node);
+        it->icon_img = NULL;
+    }
+    if (it->icon != NULL) {
+        wlr_scene_node_destroy(&it->icon->node);
+        it->icon = NULL;
+    }
+    dock_item_make_icons(server, it, app_id);
+    dock_refresh(server);
+    wlr_log(WLR_INFO, "dock: icon reloaded for app_id='%s'", app_id);
+}
+
+void dock_add_view(struct mywm_server *server, struct mywm_view *view) {    const struct design_config *d = &server->design;
     const char *app_id = NULL;
     if (view->xdg_toplevel && view->xdg_toplevel->base) {
         app_id = view->xdg_toplevel->app_id;

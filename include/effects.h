@@ -102,6 +102,11 @@ void effects_shadow_place(struct mywm_view *view, int dx, int dy,
                           int dw, int dh, float alpha);
 /* Тень в естественное положение вокруг текущего хрома. */
 void effects_shadow_reset_alpha(struct mywm_view *view, float alpha);
+/* Заголовок окна: применение zoom/transform (bs, смещения, альфа) и
+ * возврат к естественной геометрии. Реализация в xdg_shell.c. */
+void view_title_apply_anim(struct mywm_view *view, double bs,
+                           double off_x, double off_y, float alpha);
+void view_title_reset_anim(struct mywm_view *view, float alpha);
 /* Старт трансформации kind. Останавливает open/close-пружины. */
 void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind);
 /* Применение интерполяции по прогрессу пружины (вызывается из тика). */
