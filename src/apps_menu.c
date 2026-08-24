@@ -1011,6 +1011,12 @@ bool apps_menu_is_open(const struct mywm_server *server) {
     return m != NULL && (m->open || m->fade_dir == -1);
 }
 
+/* Дерево меню в сцене (для session_lock.c: скрытие при блокировке). */
+struct wlr_scene_tree *apps_menu_tree(struct mywm_server *server) {
+    struct mywm_apps_menu *m = server->apps_menu;
+    return m != NULL ? m->tree : NULL;
+}
+
 /* Прокрутка в меню: колесо мыши листает дискретно через накопитель
  * порога, свайп двумя пальцами (source == finger) тянет страницы
  * живьём с доводкой после остановки пальцев. */

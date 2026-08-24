@@ -334,6 +334,7 @@ static void server_cursor_motion(struct wl_listener *listener, void *data) {
     }
     wlr_cursor_move(server->cursor, &event->pointer->base,
                     event->delta_x, event->delta_y);
+    idle_notify_activity(server);
     process_cursor_motion(server, event->time_msec);
 }
 
@@ -346,6 +347,7 @@ static void server_cursor_motion_absolute(struct wl_listener *listener, void *da
     }
     wlr_cursor_warp_absolute(server->cursor, &event->pointer->base,
                              event->x, event->y);
+    idle_notify_activity(server);
     process_cursor_motion(server, event->time_msec);
 }
 
@@ -449,6 +451,11 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     }
     wlr_seat_pointer_notify_button(server->seat, event->time_msec,
                                    event->button, event->state);
+    idle_notify_activity(server);
+    /* Сессия заблокирована: события уходят только лок-поверхности. */
+    if (session_lock_active(server)) {
+        return;
+    }
     if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
         move_end_edge_actions(server);
         reset_cursor_mode(server);
@@ -557,6 +564,7 @@ static void server_cursor_axis(struct wl_listener *listener, void *data) {
     if (event == NULL) {
         return;
     }
+    idle_notify_activity(server);
     /* Колесо при открытом меню приложений листает сетку. */
     if (apps_menu_is_open(server)) {
         apps_menu_scroll(server, event->delta, event->source);

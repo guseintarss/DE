@@ -49,7 +49,7 @@ static void cycle_views(struct mywm_server *server) {
     bool found_focused = false;
 
     wl_list_for_each(it, &server->views, link) {
-        if (!it->mapped) {
+        if (!it->mapped || !workspace_view_visible(it)) {
             continue;
         }
         if (first_mapped == NULL) {
@@ -232,6 +232,36 @@ static void run_binding(struct mywm_server *server,
     case BIND_ACTION_RESIZE_RIGHT:
         binding_resize_view(server, RESIZE_STEP, 0);
         break;
+    case BIND_ACTION_WS_SWITCH:
+        workspace_switch(server, binding->arg);
+        break;
+    case BIND_ACTION_WS_NEXT:
+        workspace_switch_next(server);
+        break;
+    case BIND_ACTION_WS_PREV:
+        workspace_switch_prev(server);
+        break;
+    case BIND_ACTION_WS_MOVE: {
+        struct mywm_view *fv = server->focused_view;
+        if (fv != NULL && fv->mapped) {
+            workspace_move_view(fv, binding->arg);
+        }
+        break;
+    }
+    case BIND_ACTION_WS_MOVE_NEXT: {
+        struct mywm_view *fv = server->focused_view;
+        if (fv != NULL && fv->mapped) {
+            workspace_move_view_next(fv);
+        }
+        break;
+    }
+    case BIND_ACTION_WS_MOVE_PREV: {
+        struct mywm_view *fv = server->focused_view;
+        if (fv != NULL && fv->mapped) {
+            workspace_move_view_prev(fv);
+        }
+        break;
+    }
     case BIND_ACTION_TILE_LEFT:
     case BIND_ACTION_TILE_RIGHT:
     case BIND_ACTION_VIEW_MAXIMIZE:
@@ -296,6 +326,21 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
         return;
     }
     uint32_t keycode = event->keycode + 8;
+
+    idle_notify_activity(server);
+
+    /* Сессия заблокирована: клавиши целиком уходят клиенту лок-скрина,
+     * биндинги композитора (включая @exit) не работают. */
+    if (session_lock_active(server)) {
+        idle_notify_activity(server);
+        if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED ||
+                event->state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+            wlr_seat_set_keyboard(server->seat, keyboard->wlr_keyboard);
+            wlr_seat_keyboard_notify_key(server->seat, event->time_msec,
+                                         event->keycode, event->state);
+        }
+        return;
+    }
     const xkb_keysym_t *syms;
     int nsyms = xkb_state_key_get_syms(keyboard->wlr_keyboard->xkb_state,
                                        keycode, &syms);
@@ -365,6 +410,7 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 static void keyboard_handle_modifiers(struct wl_listener *listener, void *data) {
     struct mywm_keyboard *keyboard = wl_container_of(listener, keyboard, modifiers);
     (void)data;
+    idle_notify_activity(keyboard->server);
     wlr_seat_set_keyboard(keyboard->server->seat, keyboard->wlr_keyboard);
     wlr_seat_keyboard_notify_modifiers(keyboard->server->seat,
                                        &keyboard->wlr_keyboard->modifiers);

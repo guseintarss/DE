@@ -55,6 +55,7 @@ static void set_binding(struct mywm_server *server, uint32_t modifiers,
     b->action = action;
     b->repeatable = repeatable;
     b->command = command != NULL ? strdup(command) : NULL;
+    b->arg = 0;
 }
 
 void config_load_defaults(struct mywm_server *server) {
@@ -90,6 +91,31 @@ void config_load_defaults(struct mywm_server *server) {
                 BIND_ACTION_RESIZE_UP, true, NULL);
     set_binding(server, WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT, XKB_KEY_Down,
                 BIND_ACTION_RESIZE_DOWN, true, NULL);
+    /* Spaces (macOS-стиль): ctrl+стрелки — переключение, ctrl+1..9 —
+     * прямой переход, ctrl+shift+стрелки — перенос окна. */
+    set_binding(server, WLR_MODIFIER_CTRL, XKB_KEY_Left,
+                BIND_ACTION_WS_PREV, true, NULL);
+    set_binding(server, WLR_MODIFIER_CTRL, XKB_KEY_Right,
+                BIND_ACTION_WS_NEXT, true, NULL);
+    set_binding(server, WLR_MODIFIER_CTRL | WLR_MODIFIER_SHIFT, XKB_KEY_Left,
+                BIND_ACTION_WS_MOVE_PREV, true, NULL);
+    set_binding(server, WLR_MODIFIER_CTRL | WLR_MODIFIER_SHIFT, XKB_KEY_Right,
+                BIND_ACTION_WS_MOVE_NEXT, true, NULL);
+    set_binding(server, WLR_MODIFIER_CTRL, XKB_KEY_1,
+                BIND_ACTION_WS_SWITCH, false, NULL);
+    server->bindings[server->bindings_len - 1].arg = 0;
+    set_binding(server, WLR_MODIFIER_CTRL, XKB_KEY_2,
+                BIND_ACTION_WS_SWITCH, false, NULL);
+    server->bindings[server->bindings_len - 1].arg = 1;
+    set_binding(server, WLR_MODIFIER_CTRL, XKB_KEY_3,
+                BIND_ACTION_WS_SWITCH, false, NULL);
+    server->bindings[server->bindings_len - 1].arg = 2;
+    set_binding(server, WLR_MODIFIER_CTRL, XKB_KEY_4,
+                BIND_ACTION_WS_SWITCH, false, NULL);
+    server->bindings[server->bindings_len - 1].arg = 3;
+    set_binding(server, WLR_MODIFIER_CTRL, XKB_KEY_5,
+                BIND_ACTION_WS_SWITCH, false, NULL);
+    server->bindings[server->bindings_len - 1].arg = 4;
 }
 
 /* "super", "shift", "ctrl", "alt" -> бит WLR_MODIFIER_*.
@@ -147,10 +173,12 @@ out:
  * @lock [cmd], @move <dir>, @resize <dir>.
  */
 static bool parse_binding_value(const char *value, enum binding_action *action,
-                                bool *repeatable, const char **command) {
+                                bool *repeatable, const char **command,
+                                int *arg) {
     *action = BIND_ACTION_SPAWN;
     *repeatable = false;
     *command = NULL;
+    *arg = 0;
     if (value[0] != '@') {
         *command = value;
         return true;
@@ -206,6 +234,65 @@ static bool parse_binding_value(const char *value, enum binding_action *action,
             wlr_log(WLR_ERROR, "config: unknown resize direction '%s'", dir);
             return false;
         }
+        return true;
+    }
+    /* Рабочие столы: @ws <n>, @ws-next, @ws-prev, @ws-move <n>,
+     * @ws-move-next, @ws-move-prev. n — номер стола с 1. */
+    if (strncmp(cmd, "ws", 2) == 0 &&
+            (cmd[2] == '\0' || cmd[2] == ' ' || cmd[2] == '-')) {
+        const char *rest = cmd + 2;
+        if (*rest == '\0') {
+            wlr_log(WLR_ERROR, "config: @ws requires an index");
+            return false;
+        }
+        if (rest[0] == '-') {
+            const char *dir = rest + 1;
+            if (strcmp(dir, "next") == 0) {
+                *action = BIND_ACTION_WS_NEXT;
+                *repeatable = true;
+                return true;
+            }
+            if (strcmp(dir, "prev") == 0) {
+                *action = BIND_ACTION_WS_PREV;
+                *repeatable = true;
+                return true;
+            }
+            if (strncmp(dir, "move", 4) == 0) {
+                const char *md = dir + 4;
+                if (strcmp(md, "-next") == 0 || strcmp(md, " next") == 0) {
+                    *action = BIND_ACTION_WS_MOVE_NEXT;
+                    *repeatable = true;
+                    return true;
+                }
+                if (strcmp(md, "-prev") == 0 || strcmp(md, " prev") == 0) {
+                    *action = BIND_ACTION_WS_MOVE_PREV;
+                    *repeatable = true;
+                    return true;
+                }
+            }
+            wlr_log(WLR_ERROR, "config: unknown ws action '@%s'", cmd);
+            return false;
+        }
+        /* @ws <n> / @ws-move <n> */
+        bool move = false;
+        const char *num = rest;
+        if (strncmp(rest, " ", 1) == 0) {
+            num = rest + 1;
+        } else if (strncmp(rest, "-move ", 6) == 0) {
+            move = true;
+            num = rest + 6;
+        } else {
+            wlr_log(WLR_ERROR, "config: unknown ws action '@%s'", cmd);
+            return false;
+        }
+        char *end = NULL;
+        long n = strtol(num, &end, 10);
+        if (end == num || n < 1 || n > WS_MAX) {
+            wlr_log(WLR_ERROR, "config: ws index out of range in '@%s'", cmd);
+            return false;
+        }
+        *action = move ? BIND_ACTION_WS_MOVE : BIND_ACTION_WS_SWITCH;
+        *arg = (int)(n - 1); /* в 0-based */
         return true;
     }
     wlr_log(WLR_ERROR, "config: unknown action '@%s'", cmd);
@@ -573,10 +660,18 @@ void config_load(struct mywm_server *server, const char *path) {
             enum binding_action action;
             bool repeatable;
             const char *command;
+            int ws_arg = 0;
             if (parse_binding_key(key, &mods, &keysym) &&
                     parse_binding_value(val.u.s, &action, &repeatable,
-                                        &command)) {
+                                        &command, &ws_arg)) {
                 set_binding(server, mods, keysym, action, repeatable, command);
+                if (ws_arg != 0) {
+                    /* Аргумент @ws храним в биндинге (см. keybinding.arg). */
+                    struct keybinding *kb = find_binding(server, mods, keysym);
+                    if (kb != NULL) {
+                        kb->arg = ws_arg;
+                    }
+                }
                 wlr_log(WLR_DEBUG, "config: binding '%s' -> action=%d cmd='%s'",
                         key, action, command != NULL ? command : "");
             }

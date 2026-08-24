@@ -43,6 +43,37 @@ struct mywm_layer_surface;
  */
 struct mywm_ftl_toplevel;
 
+/*
+ * Рабочий стол (Spaces). Каждому столу соответствует scene-дерево —
+ * ребёнок view_tree; окна стола живут в нём, видимость стола =
+ * enabled его дерева. Описание в src/workspace.c.
+ */
+struct mywm_workspace {
+    struct wl_list link;            /* server->ws.list, по возрастанию index */
+    struct mywm_server *server;
+    struct wlr_scene_tree *tree;
+    int index;                      /* 0-based */
+};
+
+/* Состояние набора рабочих столов (server->ws). */
+struct mywm_workspaces {
+    struct wl_list list;            /* mywm_workspace::link, по возрастанию index */
+    struct mywm_workspace *current;
+    /* Анимация слайда при переключении. */
+    struct wl_event_source *anim_timer;
+    double progress;                /* 0..1 */
+    int dir;                        /* +1 вправо, -1 влево, 0 — нет анимации */
+    int width;                      /* ширина размаха (layout), px */
+    struct mywm_workspace *from, *to;
+};
+
+/*
+ * Менеджер блокировки сессии (ext-session-lock-v1) + idle-нотификатор.
+ * Описание в src/session_lock.c.
+ */
+struct mywm_lock_manager;
+struct wlr_idle_notifier_v1;
+
 /* Невидимая хит-зона ресайза по краям окна. */
 #define RESIZE_HIT 6
 /* Отступ кнопок управления слева в заголовке. */
@@ -200,6 +231,14 @@ struct mywm_server {
     struct wlr_foreign_toplevel_manager_v1 *ftl_manager;
     struct wl_list ftl_toplevels;   /* struct mywm_ftl_toplevel::link */
 
+    /* --- Рабочие столы (Spaces, src/workspace.c) --- */
+    struct mywm_workspaces ws;
+
+    /* --- Блокировка сессии и простой (src/session_lock.c) --- */
+    struct mywm_lock_manager *lock;
+    /* ext-idle-notify: нотификатор, кормится активностью из ввода. */
+    struct wlr_idle_notifier_v1 *idle_notifier;
+
     struct wl_listener new_layer_surface;
 
     struct wl_list outputs;
@@ -311,6 +350,8 @@ struct mywm_view {
      * тик анимации не трогал освобождённую память. */
     struct wl_listener scene_destroy;
     bool mapped;
+    /* Рабочий стол (Spaces), на котором живёт окно. */
+    struct mywm_workspace *ws;
     /* Позиция view в координатах wlr_output_layout.
      * x/y обновляются композитором при перемещении и синхронизируются
      * с позицией scene-ноды в commit. */
@@ -428,6 +469,8 @@ void apps_menu_scroll(struct mywm_server *server, double delta,
  * Всегда поглощает клик (возвращает true). */
 bool apps_menu_click(struct mywm_server *server, double lx, double ly);
 void apps_menu_motion(struct mywm_server *server, double lx, double ly);
+/* Дерево меню в сцене (NULL, если меню не создано). */
+struct wlr_scene_tree *apps_menu_tree(struct mywm_server *server);
 
 /* --- bar.c --- */
 /* Текстовый буфер для подписей оболочки (меню приложений и т.п.). */
@@ -525,5 +568,33 @@ void foreign_toplevel_map(struct mywm_view *view);
 void foreign_toplevel_unmap(struct mywm_view *view);
 void foreign_toplevel_title(struct mywm_view *view);
 void foreign_toplevel_state(struct mywm_view *view);
+
+/* --- session_lock.c --- */
+/* ext-session-lock-v1, wlr-data-control, ext-idle-notify + inhibit.
+ * Вызывать в самом конце server_init (дерево лок-поверхностей должно
+ * создаться выше всех остальных). */
+void session_lock_init(struct mywm_server *server);
+/* Сессия заблокирована: биндинги/клики оболочки отключены. */
+bool session_lock_active(const struct mywm_server *server);
+/* Сообщить нотификатору простоя о пользовательской активности. */
+void idle_notify_activity(struct mywm_server *server);
+
+/* --- workspace.c --- */
+/* Создать воркспейс 0; вызывать после layer_shell_init (view_tree готов). */
+void workspaces_init(struct mywm_server *server);
+/* Дерево активного стола — родитель новых окон. */
+struct wlr_scene_tree *workspace_active_tree(struct mywm_server *server);
+/* Переключение (со слайдом); index 0-based, стол создаётся при need. */
+void workspace_switch(struct mywm_server *server, int index);
+void workspace_switch_next(struct mywm_server *server);
+void workspace_switch_prev(struct mywm_server *server);
+/* Перенести окно на стол index (0-based) и переключиться за ним. */
+void workspace_move_view(struct mywm_view *view, int index);
+void workspace_move_view_next(struct mywm_view *view);
+void workspace_move_view_prev(struct mywm_view *view);
+/* Окно принадлежит активному столу (для alt-tab и рендера). */
+bool workspace_view_visible(const struct mywm_view *view);
+int workspace_current_index(const struct mywm_server *server);
+int workspace_count(const struct mywm_server *server);
 
 #endif

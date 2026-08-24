@@ -296,9 +296,14 @@ void server_init(struct mywm_server *server) {
                                      server->output_layout);
     /* Публикация окон для таскбаров/доков внешних оболочек. */
     foreign_toplevel_init(server);
+    /* Рабочие столы (Spaces): деревья внутри view_tree. */
+    workspaces_init(server);
     dock_init(server);
     bar_init(server);
     apps_menu_init(server);
+    /* Лок-скрин, буфер обмена (data-control) и простой (idle).
+     * Строго последним: дерево lock-поверхностей выше всех. */
+    session_lock_init(server);
 
     server->new_output.notify = server_new_output;
     wl_signal_add(&server->backend->events.new_output, &server->new_output);

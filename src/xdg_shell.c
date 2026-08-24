@@ -172,9 +172,18 @@ void focus_view(struct mywm_server *server, struct mywm_view *view,
     if (server == NULL || view == NULL || surface == NULL || !view->mapped) {
         return;
     }
+    /* Блокировка сессии: фокус не покидает лок-поверхность. */
+    if (session_lock_active(server)) {
+        return;
+    }
     struct wlr_seat *seat = server->seat;
     if (seat == NULL) {
         return;
+    }
+    /* Окно с другого рабочего стола: сначала переключаем стол
+     * (macOS-поведение: клик в доке уводит на нужный Space). */
+    if (view->ws != NULL && view->ws != server->ws.current) {
+        workspace_switch(server, view->ws->index);
     }
     /* Сворачивание отключает узел декораций; клик по иконке дока (или
      * Cmd+Tab) запускает обратную genie-анимацию, фокус придёт после
@@ -569,9 +578,10 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     const struct design_config *d = &server->design;
     /* Контейнер декораций: бордюр (весь контур), тело и заголовок.
      * Содержимое (scene_tree) — ребёнок контейнера со сдвигом на
-     * (border, title). Родитель — view_tree: окна между bottom- и
-     * top-слоями layer-shell (см. layer_shell_init). */
-    view->deco_tree = wlr_scene_tree_create(server->view_tree);
+     * (border, title). Родитель — дерево активного рабочего стола
+     * (Spaces): окна между bottom- и top-слоями layer-shell. */
+    view->ws = server->ws.current;
+    view->deco_tree = wlr_scene_tree_create(workspace_active_tree(server));
     if (view->deco_tree == NULL) {
         free(view);
         return;

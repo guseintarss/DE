@@ -27,7 +27,18 @@ enum binding_action {
     BIND_ACTION_TILE_RIGHT,     /* Super+Right: правая половина */
     BIND_ACTION_VIEW_MAXIMIZE,  /* Super+Up: максимизация */
     BIND_ACTION_VIEW_RESTORE,   /* Super+Down: восстановить/свернуть */
+    /* Рабочие столы (Spaces): arg — индекс назначения (0-based) для
+     * SWITCH/MOVE. */
+    BIND_ACTION_WS_SWITCH,      /* @ws <n>: перейти на стол n */
+    BIND_ACTION_WS_NEXT,        /* @ws-next */
+    BIND_ACTION_WS_PREV,        /* @ws-prev */
+    BIND_ACTION_WS_MOVE,        /* @ws-move <n>: окно -> стол n (и следом) */
+    BIND_ACTION_WS_MOVE_NEXT,   /* @ws-move-next */
+    BIND_ACTION_WS_MOVE_PREV,   /* @ws-move-prev */
 };
+
+/* Число воркспейсов (Spaces). Индексы 0..WS_MAX-1, создаются по demand. */
+#define WS_MAX 9
 
 struct keybinding {
     /* Маска WLR_MODIFIER_* (wlr/types/wlr_keyboard.h): какие модификаторы
@@ -41,6 +52,8 @@ struct keybinding {
     bool repeatable;
     /* Команда для BIND_ACTION_SPAWN/LOCK (argv без шелла), иначе NULL. */
     char *command;
+    /* Числовой аргумент действия (@ws 3 -> 2, 0-based). */
+    int arg;
 };
 
 /* --- Этап 5: эффекты --- */
