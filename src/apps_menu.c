@@ -19,8 +19,8 @@
  * Полноэкранное меню приложений (Launchpad): тёмный оверлей поверх рабочего
  * стола с сеткой иконок и подписей. Список строится из .desktop-файлов
  * XDG-каталогов при каждом открытии. Приложения, не влезающие в сетку,
- * образуют страницы: колесо/клик по точкам перелистывает их с анимацией
- * «книжного» переворота (сжатие к вертикальному корешку по центру сетки).
+ * образуют страницы: колесо/свайп/клик по точкам листает их с плавной
+ * анимацией горизонтального скольжения (как Launchpad в macOS).
  * Клик по иконке — запуск, клик мимо / Esc / повторный клик по пину —
  * закрытие.
  */
@@ -38,9 +38,8 @@
 #define APPS_HOVER_LIFT 6      /* Подъём иконки, px */
 #define APPS_PILL_ALPHA 0.10   /* Альфа пилюли-подсветки */
 #define APPS_FLIP_S 0.42       /* Длительность перелистывания, с */
+#define APPS_PAGE_GAP 96       /* Зазор между страницами при листании */
 #define APPS_FLIP_MS 16
-#define APPS_FLIP_MIN_SX 0.12  /* Остаточная ширина страницы у корешка */
-#define APPS_FLIP_OUT_A 0.28   /* Альфа уходящей страницы в конце */
 #define APPS_DOT_STEP 16       /* Шаг точек-индикатора страниц */
 #define APPS_DOT_R 4.0         /* Радиус точки */
 #define APPS_SCROLL_THRESHOLD 1.5 /* Накопленная дельта для листания */
@@ -267,6 +266,11 @@ static void cells_destroy(struct mywm_apps_menu *m) {
     m->per_page = 0;
     m->flip_t = 0.0;
     m->flip_pending = -1;
+    if (m->swipe_timer != NULL) {
+        wl_event_source_timer_update(m->swipe_timer, 0);
+    }
+    m->swiping = false;
+    m->swipe_off = 0.0;
     m->scroll_acc = 0.0;
     m->scroll_last = 0.0;
     if (m->dots != NULL) {
@@ -494,77 +498,73 @@ static void cell_place_base(struct apps_cell *cell) {
     }
 }
 
-/* --- Перелистывание страниц «как книга» --- */
+/* --- Листание страниц скольжением (Launchpad) --- */
 
 static void flip_start(struct mywm_apps_menu *m, int dir, int target);
+static void flip_launch(struct mywm_apps_menu *m, int from, int to,
+                        int dir, double t0);
 static void dots_update(struct mywm_apps_menu *m);
 
-/* Искажение ячейки в полёте: s — горизонтальное сжатие к корешку
- * (вертикальная ось по центру сетки), slide — сдвиг по X, alpha —
- * множитель прозрачности поверх фейда меню. Высота не меняется —
- * вращение вокруг вертикальной оси её сохраняет. */
-static void flip_apply_cell(struct mywm_apps_menu *m, struct apps_cell *c,
-                            double sx, double alpha, double slide) {
-    double ax = m->grid_x + (double)m->cols * APPS_CELL_W / 2.0;
-    float op = (float)(m->fade * alpha);
-    if (op < 0.0f) op = 0.0f;
-    if (op > 1.0f) op = 1.0f;
-    /* Иконка. */
-    double cx = c->lx + APPS_CELL_W / 2.0;
-    double ncx = ax + (cx - ax) * sx + slide;
-    int iw = (int)(APPS_ICON * sx + 0.5);
-    if (iw < 2) {
-        iw = 2;
-    }
-    wlr_scene_buffer_set_dest_size(c->icon_node, iw, APPS_ICON);
+/* Сдвиг ячейки на dx по горизонтали (скольжение страницы). Иконки
+ * остаются в базовом масштабе, прозрачность = фейд меню. */
+static void cell_shift(struct apps_cell *c, double dx) {
+    wlr_scene_buffer_set_dest_size(c->icon_node, APPS_ICON, APPS_ICON);
     wlr_scene_node_set_position(&c->icon_node->node,
-                                (int)(ncx - iw / 2.0 + 0.5), c->ly);
-    wlr_scene_buffer_set_opacity(c->icon_node, op);
-    /* Подпись сжимается тем же коэффициентом вокруг той же оси. */
+                                c->lx + (APPS_CELL_W - APPS_ICON) / 2 +
+                                    (int)(dx + (dx >= 0 ? 0.5 : -0.5)),
+                                c->ly);
     if (c->label_node != NULL && c->label_buf != NULL) {
-        double lw = (double)c->label_buf->base.width;
-        double nlw = lw * sx;
-        if (nlw < 2.0) {
-            nlw = 2.0;
-        }
-        double ncx2 = ax + (cx - ax) * sx + slide;
-        wlr_scene_buffer_set_dest_size(c->label_node, (int)(nlw + 0.5),
-                                       (int)c->label_buf->base.height);
-        wlr_scene_node_set_position(&c->label_node->node,
-                                    (int)(ncx2 - nlw / 2.0 + 0.5),
-                                    c->ly + APPS_ICON + 4);
-        wlr_scene_buffer_set_opacity(c->label_node, op);
+        wlr_scene_node_set_position(
+            &c->label_node->node,
+            c->lx + (APPS_CELL_W -
+                     (int)c->label_buf->base.width) / 2 +
+                (int)(dx + (dx >= 0 ? 0.5 : -0.5)),
+            c->ly + APPS_ICON + 4);
     }
 }
 
-/* Применяет фазу переворота p (0..1) к обеим страницам: уходящая
- * сжимается к корешку и уходит против направления, приходящая
- * разворачивается из-за корешка по ходу движения. */
-static void flip_apply(struct mywm_apps_menu *m, double p) {
-    double ei = p * p;                       /* ease-in квадрикой */
-    double q = 1.0 - p;
-    double eo = 1.0 - q * q * q;             /* ease-out кубом */
-    double s_out = 1.0 - (1.0 - APPS_FLIP_MIN_SX) * ei;
-    double a_out = 1.0 - (1.0 - APPS_FLIP_OUT_A) * ei;
-    double s_in = APPS_FLIP_MIN_SX + (1.0 - APPS_FLIP_MIN_SX) * eo;
-    double a_in = APPS_FLIP_OUT_A + (1.0 - APPS_FLIP_OUT_A) * p;
-    double swing = (double)m->cols * APPS_CELL_W * 0.22;
-    double sl_out = -swing * ei * m->flip_dir;
-    double sl_in = swing * (1.0 - eo) * m->flip_dir;
+/* Рендер скольжения между парой страниц с линейным прогрессом p
+ * (0..1): обе страницы едут вместе как одна лента — уходящая уходит
+ * против направления на ширину сетки, приходящая приходит из-за края.
+ * Используется и таймером анимации (с easing), и свайпом (линейно). */
+static void flip_render(struct mywm_apps_menu *m, int from, int to,
+                        int dir, double p) {
+    if (p < 0.0) {
+        p = 0.0;
+    }
+    if (p > 1.0) {
+        p = 1.0;
+    }
+    /* Шаг ленты = ширина страницы + зазор: соседние страницы не
+     * соприкасаются, между ними всегда виден просвет. */
+    double pitch = (double)m->cols * APPS_CELL_W + APPS_PAGE_GAP;
+    double off_from = -pitch * p * dir;
+    double off_to = pitch * (1.0 - p) * dir;
+    float op = (float)m->fade;
     struct apps_cell *cell;
     wl_list_for_each(cell, &m->cells, link) {
-        if (!cell->icon_node->node.enabled) {
+        bool vis = cell->page == from || cell->page == to;
+        wlr_scene_node_set_enabled(&cell->icon_node->node, vis);
+        if (cell->label_node != NULL) {
+            wlr_scene_node_set_enabled(&cell->label_node->node, vis);
+        }
+        if (!vis) {
             continue;
         }
-        if (cell->page == m->flip_from) {
-            flip_apply_cell(m, cell, s_out, a_out, sl_out);
-        } else if (cell->page == m->flip_to) {
-            flip_apply_cell(m, cell, s_in, a_in, sl_in);
+        cell_shift(cell, cell->page == from ? off_from : off_to);
+        wlr_scene_buffer_set_opacity(cell->icon_node, op);
+        if (cell->label_node != NULL) {
+            wlr_scene_buffer_set_opacity(cell->label_node, op);
         }
     }
 }
 
 static void menu_apply_page(struct mywm_apps_menu *m);
+
+/* Фаза переворота текущей анимации. */
+static void flip_apply(struct mywm_apps_menu *m, double p) {
+    flip_render(m, m->flip_from, m->flip_to, m->flip_dir, p);
+}
 
 /* Завершение переворота: страница фиксируется, уходящие ячейки гасятся,
  * индикатор точек перерисовывается; при наличии очереди колеса —
@@ -606,9 +606,40 @@ static int flip_tick(void *data) {
         flip_finish(m);
         return 0;
     }
-    flip_apply(m, m->flip_t);
+    /* Smoothstep: мягкий разгон и мягкое торможение — как в macOS.
+     * Свайп при этом рендерится линейно (без easing) в flip_render. */
+    double p = m->flip_t * m->flip_t * (3.0 - 2.0 * m->flip_t);
+    flip_apply(m, p);
     wl_event_source_timer_update(m->flip_timer, APPS_FLIP_MS);
     return 0;
+}
+
+/* Запуск анимации из from в to с начальной фазы t0 (0..1) — используется
+ * колесом (t0=0) и доводкой свайпа (t0 = текущая фаза тяги). */
+static void flip_launch(struct mywm_apps_menu *m, int from, int to,
+                        int dir, double t0) {
+    if (to < 0 || to >= m->pages || to == from) {
+        return;
+    }
+    hover_hard_reset(m);
+    m->flipping = true;
+    m->flip_dir = dir;
+    m->flip_from = from;
+    m->flip_to = to;
+    m->page = to;
+    m->flip_t = t0;
+    m->flip_last = 0.0;
+    if (m->swiping) {
+        m->swiping = false;
+        if (m->swipe_timer != NULL) {
+            wl_event_source_timer_update(m->swipe_timer, 0);
+        }
+    }
+    double p0 = m->flip_t * m->flip_t * (3.0 - 2.0 * m->flip_t);
+    flip_apply(m, p0);
+    if (m->flip_timer != NULL) {
+        wl_event_source_timer_update(m->flip_timer, 1);
+    }
 }
 
 /* Старт переворота на страницу target (dir — направление жеста). */
@@ -616,27 +647,73 @@ static void flip_start(struct mywm_apps_menu *m, int dir, int target) {
     if (target < 0 || target >= m->pages || target == m->page) {
         return;
     }
-    hover_hard_reset(m);
-    m->flipping = true;
-    m->flip_dir = dir;
-    m->flip_from = m->page;
-    m->flip_to = target;
-    m->page = target;
-    m->flip_t = 0.0;
-    m->flip_last = 0.0;
-    /* Обе страницы должны быть видны до первого тика. */
-    struct apps_cell *cell;
-    wl_list_for_each(cell, &m->cells, link) {
-        bool vis = cell->page == m->flip_from ||
-                   cell->page == m->flip_to;
-        wlr_scene_node_set_enabled(&cell->icon_node->node, vis);
-        if (cell->label_node != NULL) {
-            wlr_scene_node_set_enabled(&cell->label_node->node, vis);
-        }
+    flip_launch(m, m->page, target, dir, 0.0);
+}
+
+/* --- Свайп двумя пальцами: страницы тянутся за пальцем --- */
+
+/* Тик-детектор конца свайпа: пальцы молчат APPS_SWIPE_END_MS —
+ * доводим до ближайшей страницы. */
+static int swipe_end_tick(void *data) {
+    struct mywm_apps_menu *m = data;
+    if (!m->swiping) {
+        return 0;
     }
-    if (m->flip_timer != NULL) {
-        wl_event_source_timer_update(m->flip_timer, 1);
+    m->swiping = false;
+    wl_event_source_timer_update(m->swipe_timer, 0);
+
+    int dir = m->swipe_off >= 0 ? 1 : -1;
+    double frac = fabs(m->swipe_off);
+    int nb = m->swipe_base + dir;
+    bool nb_ok = nb >= 0 && nb < m->pages;
+    if (frac >= 0.5 && nb_ok) {
+        /* Перешли половину — листаем, начиная с текущей фазы. */
+        flip_launch(m, m->swipe_base, nb, dir, frac);
+    } else if (frac > 0.02 && nb_ok) {
+        /* Возврат на исходную: рендерим ту же пару в обратную
+         * сторону, стартуя с зеркальной фазы. */
+        flip_launch(m, nb, m->swipe_base, -dir, 1.0 - frac);
+    } else {
+        menu_apply_page(m);
     }
+    return 0;
+}
+
+/* Обновление живого свайпа от очередного события оси пальцами. */
+static void swipe_update(struct mywm_apps_menu *m, double delta) {
+    if (m->flipping) {
+        return; /* ждём окончания предыдущей анимации */
+    }
+    if (!m->swiping) {
+        hover_hard_reset(m);
+        m->swiping = true;
+        m->swipe_base = m->page;
+        m->swipe_off = 0.0;
+    }
+    double page_w = (double)m->cols * APPS_CELL_W;
+    m->swipe_off += delta * APPS_SWIPE_GAIN / page_w;
+
+    /* «Резина» за краями диапазона страниц. */
+    double lo = -(double)m->swipe_base;
+    double hi = (double)(m->pages - 1) - (double)m->swipe_base;
+    if (m->swipe_off > hi) {
+        m->swipe_off = hi + (m->swipe_off - hi) * APPS_SWIPE_RUBBER;
+    } else if (m->swipe_off < lo) {
+        m->swipe_off = lo + (m->swipe_off - lo) * APPS_SWIPE_RUBBER;
+    }
+
+    int dir = m->swipe_off >= 0 ? 1 : -1;
+    int nb = m->swipe_base + dir;
+    double frac = fabs(m->swipe_off);
+    if ((nb < 0 || nb >= m->pages) && m->swipe_base >= 0 &&
+            m->swipe_base < m->pages) {
+        /* Соседа нет — тянем только базовую страницу лёгким сжатием. */
+        flip_render(m, m->swipe_base, m->swipe_base, dir,
+                    frac * APPS_SWIPE_RUBBER);
+    } else {
+        flip_render(m, m->swipe_base, nb, dir, frac);
+    }
+    wl_event_source_timer_update(m->swipe_timer, APPS_SWIPE_END_MS);
 }
 
 /* --- Точки-индикаторы страниц --- */
@@ -756,6 +833,7 @@ void apps_menu_init(struct mywm_server *server) {
     m->fade_timer = wl_event_loop_add_timer(loop, menu_fade_tick, m);
     m->hov_timer = wl_event_loop_add_timer(loop, hover_tick, m);
     m->flip_timer = wl_event_loop_add_timer(loop, flip_tick, m);
+    m->swipe_timer = wl_event_loop_add_timer(loop, swipe_end_tick, m);
     m->flip_pending = -1;
     server->apps_menu = m;
     wlr_scene_node_set_enabled(&m->tree->node, false);
@@ -773,6 +851,13 @@ void apps_menu_toggle(struct mywm_server *server) {
         if (m->flipping) {
             m->flip_t = 1.0;
             flip_finish(m);
+        }
+        if (m->swiping) {
+            m->swiping = false;
+            if (m->swipe_timer != NULL) {
+                wl_event_source_timer_update(m->swipe_timer, 0);
+            }
+            menu_apply_page(m);
         }
         if (m->fade_timer != NULL) {
             menu_fade_start(m, -1);
@@ -926,15 +1011,22 @@ bool apps_menu_is_open(const struct mywm_server *server) {
     return m != NULL && (m->open || m->fade_dir == -1);
 }
 
-/* Колесо мыши — листание страниц. Чтобы случайное касание или один
- * «щелчок» не листали страницу, дельты копятся в scroll_acc и листание
- * происходит при превышении порога; пауза дольше APPS_SCROLL_IDLE_S
- * сбрасывает накопление. Во время анимации запрос запоминается. */
-void apps_menu_scroll(struct mywm_server *server, double delta) {
+/* Прокрутка в меню: колесо мыши листает дискретно через накопитель
+ * порога, свайп двумя пальцами (source == finger) тянет страницы
+ * живьём с доводкой после остановки пальцев. */
+void apps_menu_scroll(struct mywm_server *server, double delta,
+                      uint32_t source) {
     struct mywm_apps_menu *m = server->apps_menu;
     if (m == NULL || !m->open || delta == 0.0) {
         return;
     }
+    if (source == WL_POINTER_AXIS_SOURCE_FINGER) {
+        swipe_update(m, delta);
+        return;
+    }
+    /* Колесо: чтобы случайное касание или один «щелчок» не листали
+     * страницу, дельты копятся в scroll_acc; пауза дольше
+     * APPS_SCROLL_IDLE_S сбрасывает накопление. */
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     double now = (double)ts.tv_sec + ts.tv_nsec / 1e9;
@@ -950,9 +1042,9 @@ void apps_menu_scroll(struct mywm_server *server, double delta) {
     int dir = m->scroll_acc > 0 ? 1 : -1;
     m->scroll_acc = 0.0;
 
-    if (m->flipping) {
+    if (m->flipping || m->swiping) {
         /* Копим намерение от последнего запрошенного листания. */
-        int base = m->flip_pending >= 0 ? m->flip_pending : m->flip_to;
+        int base = m->flip_pending >= 0 ? m->flip_pending : m->page;
         int next = base + dir;
         if (next < 0) {
             next = 0;
@@ -970,7 +1062,7 @@ void apps_menu_scroll(struct mywm_server *server, double delta) {
  * переключение ховера. Координаты — глобальные (layout), как в click. */
 void apps_menu_motion(struct mywm_server *server, double lx, double ly) {
     struct mywm_apps_menu *m = server->apps_menu;
-    if (m == NULL || !m->open || m->flipping) {
+    if (m == NULL || !m->open || m->flipping || m->swiping) {
         return;
     }
     struct apps_cell *pick = NULL;
@@ -1004,8 +1096,8 @@ bool apps_menu_click(struct mywm_server *server, double lx, double ly) {
     if (m == NULL || !m->open) {
         return false;
     }
-    if (m->flipping) {
-        return true; /* Во время переворота клики игнорируем. */
+    if (m->flipping || m->swiping) {
+        return true; /* Во время переворота/свайпа клики игнорируем. */
     }
     /* Клик по точкам-индикаторам — прыжок на страницу. */
     if (m->pages > 1 && m->dots_w > 0 &&

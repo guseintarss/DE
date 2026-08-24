@@ -414,6 +414,7 @@ static void move_end_edge_actions(struct mywm_server *server) {
     const struct design_config *d = &server->design;
     struct wlr_box box;
     wlr_output_layout_get_box(server->output_layout, NULL, &box);
+    struct wlr_box usable = shell_usable_box(server);
     double cx = server->cursor->x;
     double cy = server->cursor->y;
     /* Учитываем точку под курсором И край самого окна. */
@@ -422,7 +423,8 @@ static void move_end_edge_actions(struct mywm_server *server) {
     bool right = cx >= box.x + box.width - TILE_EDGE_PX ||
         view->x + view->width + 2 * d->border >=
             box.x + box.width - 2;
-    bool top = cy <= box.y + d->menu_bar_h + TILE_EDGE_PX;
+    bool top = usable.height > 0 &&
+        cy <= usable.y + TILE_EDGE_PX;
     if (top && !left && !right) {
         maximize_view(view);
         return;
@@ -557,7 +559,7 @@ static void server_cursor_axis(struct wl_listener *listener, void *data) {
     }
     /* Колесо при открытом меню приложений листает сетку. */
     if (apps_menu_is_open(server)) {
-        apps_menu_scroll(server, event->delta);
+        apps_menu_scroll(server, event->delta, event->source);
         wlr_seat_pointer_notify_frame(server->seat);
         return;
     }

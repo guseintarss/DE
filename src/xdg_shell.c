@@ -199,6 +199,7 @@ void focus_view(struct mywm_server *server, struct mywm_view *view,
             if (prev_view != NULL) {
                 effects_chrome_regen(prev_view);
                 view_buttons_apply(prev_view);
+                foreign_toplevel_state(prev_view);
             }
         }
     }
@@ -219,6 +220,7 @@ void focus_view(struct mywm_server *server, struct mywm_view *view,
                                        keyboard->keycodes, keyboard->num_keycodes,
                                        &keyboard->modifiers);
     }
+    foreign_toplevel_state(view);
     /* Пересчитываем точку входа указателя относительно поверхности.
      * Для toplevel-поверхности без смещения геометрии достаточно вычесть
      * позицию scene-ноды. */
@@ -269,8 +271,7 @@ void maximize_view(struct mywm_view *view) {
     if (server->grabbed_view == view) {
         reset_cursor_mode(server);
     }
-    struct wlr_box box;
-    wlr_output_layout_get_box(server->output_layout, NULL, &box);
+    struct wlr_box box = shell_usable_box(server);
     if (view->maximized) {
         view->maximized = false;
         wlr_xdg_toplevel_set_size(view->xdg_toplevel,
@@ -285,8 +286,7 @@ void maximize_view(struct mywm_view *view) {
         const struct design_config *d = &server->design;
         wlr_xdg_toplevel_set_size(view->xdg_toplevel,
                                   box.width - 2 * d->border,
-                                  box.height - d->menu_bar_h -
-                                      d->title_h - d->border);
+                                  box.height - d->title_h - d->border);
         effects_tform_start(view, TFORM_MAXIMIZE);
     }
     bar_update_name(server);
@@ -336,13 +336,12 @@ void tile_view(struct mywm_view *view, int side) {
                                   view->save_w, view->save_h);
         effects_view_set_position(view, view->save_x, view->save_y);
     } else {
-        struct wlr_box box;
-        wlr_output_layout_get_box(server->output_layout, NULL, &box);
+        struct wlr_box box = shell_usable_box(server);
         int half_w = box.width / 2 - 2 * d->border;
-        int h = box.height - d->menu_bar_h - d->title_h - d->border;
+        int h = box.height - d->title_h - d->border;
         int x = side == 1 ? box.x : box.x + box.width / 2;
         wlr_xdg_toplevel_set_size(view->xdg_toplevel, half_w, h);
-        effects_view_set_position(view, x, box.y + d->menu_bar_h);
+        effects_view_set_position(view, x, box.y);
         if (server->focused_view == view) {
             effects_chrome_regen(view);
         }
@@ -363,6 +362,7 @@ static void xdg_toplevel_map_handler(struct wl_listener *listener, void *data) {
     view_effects_open(view);
     focus_view(view->server, view, view->xdg_toplevel->base->surface);
     dock_refresh(view->server);
+    foreign_toplevel_map(view);
     wlr_log(WLR_DEBUG, "toplevel mapped: view=%p pos=(%d,%d)",
             (void *)view, view->x, view->y);
 }
@@ -381,6 +381,7 @@ static void xdg_toplevel_unmap_handler(struct wl_listener *listener, void *data)
     if (view->server->focused_view == view) {
         view->server->focused_view = NULL;
     }
+    foreign_toplevel_unmap(view);
     dock_refresh(view->server);
     bar_update_name(view->server);
     wlr_log(WLR_DEBUG, "toplevel unmapped: view=%p", (void *)view);
@@ -436,6 +437,10 @@ static void xdg_toplevel_commit_handler(struct wl_listener *listener, void *data
             dock_resolve_view(view->server, view, aid);
         }
     }
+    /* Внешним таскбарам: заголовок и app_id могут меняться в любом
+     * commit (плюс состояние после подтверждения configure). */
+    foreign_toplevel_title(view);
+    foreign_toplevel_state(view);
     /* Содержимое клиента: первый buffer-ребёнок scene_tree. Появляется
      * только после первого commit клиента. */
     if (view->content_buffer == NULL) {
@@ -494,6 +499,7 @@ void view_destroy_final(struct mywm_view *view) {
     if (server->hovered_view == view) {
         server->hovered_view = NULL;
     }
+    foreign_toplevel_unmap(view);
     dock_remove_view(server, view);
     /* Освобождаем CPU-ресурсы декораций; scene-ноды умрут вместе с деревьями. */
     if (view->title_buf != NULL) {
@@ -563,8 +569,9 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
     const struct design_config *d = &server->design;
     /* Контейнер декораций: бордюр (весь контур), тело и заголовок.
      * Содержимое (scene_tree) — ребёнок контейнера со сдвигом на
-     * (border, title). */
-    view->deco_tree = wlr_scene_tree_create(&server->scene->tree);
+     * (border, title). Родитель — view_tree: окна между bottom- и
+     * top-слоями layer-shell (см. layer_shell_init). */
+    view->deco_tree = wlr_scene_tree_create(server->view_tree);
     if (view->deco_tree == NULL) {
         free(view);
         return;

@@ -343,19 +343,17 @@ void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind) {
     };
     struct tform_geo b = a;
 
-    struct wlr_box box;
-    wlr_output_layout_get_box(server->output_layout, NULL, &box);
-
     switch (kind) {
     case TFORM_MAXIMIZE: {
         const struct design_config *d = &server->design;
-        double tch = box.height - d->menu_bar_h;
+        struct wlr_box usable = shell_usable_box(server);
+        double tch = (double)usable.height;
         b = (struct tform_geo){
-            .x = box.x,
-            .y = box.y + d->menu_bar_h,
-            .cw = box.width,
+            .x = usable.x,
+            .y = usable.y,
+            .cw = usable.width,
             .ch = tch,
-            .w = box.width - 2 * d->border,
+            .w = usable.width - 2 * d->border,
             .h = tch - d->title_h - d->border,
             .op = 1.0,
         };

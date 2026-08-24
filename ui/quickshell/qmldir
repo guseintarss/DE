@@ -1,0 +1,4 @@
+singleton ShellState 1.0 ShellState.qml
+TopBar 1.0 TopBar.qml
+Dock 1.0 Dock.qml
+Launcher 1.0 Launcher.qml

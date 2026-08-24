@@ -283,7 +283,8 @@ enum mywm_title_button bar_button_at(struct mywm_server *server,
     struct mywm_bar *bar = &server->bar;
     const struct design_config *d = &server->design;
     int btn_y = (d->menu_bar_h - d->btn_size) / 2;
-    if (server->focused_view == NULL ||
+    if (!server->shell_cfg.builtin || bar->tree == NULL ||
+        server->focused_view == NULL ||
         !server->focused_view->maximized ||
         !server->focused_view->mapped ||
         !bar->btns[0].node->node.enabled) {
@@ -314,6 +315,9 @@ enum mywm_title_button bar_button_at(struct mywm_server *server,
 
 /* Обновляет часы в менюбаре (текст зависит от текущего времени). */
 void bar_update_clock(struct mywm_server *server) {
+    if (!server->shell_cfg.builtin || server->bar.tree == NULL) {
+        return;
+    }
     time_t now = time(NULL);
     struct tm *tm_now = localtime(&now);
     char text[48];
@@ -538,6 +542,9 @@ static struct mywm_text_buf *bar_icon_battery(struct mywm_server *server) {
 
 /* Обновляет имя активного приложения в менюбаре. */
 void bar_update_name(struct mywm_server *server) {
+    if (!server->shell_cfg.builtin || server->bar.tree == NULL) {
+        return;
+    }
     struct mywm_view *focused = server->focused_view;
     const char *title = "Рабочий стол";
     if (focused != NULL && focused->xdg_toplevel != NULL &&
@@ -554,10 +561,23 @@ void bar_update_name(struct mywm_server *server) {
 
 /* Менюбар всегда поверх окон (как в macOS). */
 void bar_raise(struct mywm_server *server) {
+    if (server->bar.tree == NULL) {
+        return;
+    }
     wlr_scene_node_raise_to_top(&server->bar.tree->node);
 }
 
 void bar_init(struct mywm_server *server) {
+    /* SF Pro Display из папки проекта нужен и декорациям окон
+     * (заголовки), поэтому регистрируется даже без встроенного бара. */
+    FcConfigAppFontAddDir(
+        FcConfigGetCurrent(),
+        (const FcChar8 *)"/home/temir/Проекты/Code/DE/fonts/San Francisco Pro Display");
+    if (!server->shell_cfg.builtin) {
+        /* Внешняя оболочка ([shell].builtin=false): менюбар не создаём. */
+        return;
+    }
+    setlocale(LC_TIME, "");
     server->bar.server = server;
     const struct design_config *d = &server->design;
     server->bar.tree = wlr_scene_tree_create(&server->scene->tree);
@@ -596,13 +616,6 @@ void bar_init(struct mywm_server *server) {
         wlr_scene_buffer_set_buffer(server->bar.battery,
                                     &server->bar.battery_buf->base);
     }
-    setlocale(LC_TIME, "");
-
-    /* SF Pro Display из папки проекта. */
-    FcConfigAppFontAddDir(
-        FcConfigGetCurrent(),
-        (const FcChar8 *)"/home/temir/Проекты/Code/DE/fonts/San Francisco Pro Display");
-
     struct wl_event_loop *loop =
         wl_display_get_event_loop(server->wl_display);
     server->bar.clock_timer =

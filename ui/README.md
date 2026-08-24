@@ -1,101 +1,78 @@
-# Инструкция по запуску PySide6 UI для DE
+# Оболочка DE: внешний UI поверх композитора
 
-## Архитектура
-- **C++ ядро** (компилятор/оконный менеджер) - управляет окнами, Wayland, вводом
-- **PySide6 UI** (отдельный процесс) - отрисовка панелей, дока, настроек
-- **Связь через D-Bus** - высокоуровневые команды и события
+Композитор поддерживает два режима оболочки (`[shell]` в `config.toml`):
 
-## Требования
+- **`builtin = true`** — менюбар и док рисует сам композитор
+  (`src/bar.c`, `src/dock.c`).
+- **`builtin = false`** (текущий) — панель/док рисует внешний клиент
+  через `zwlr-layer-shell-v1`. Список окон публикуется через
+  `wlr-foreign-toplevel-management-v1`.
+
+## Протоколы, добавленные в композитор
+
+| Протокол | Зачем |
+|---|---|
+| `zwlr-layer-shell-v1` | панели по краям экрана, эксклюзивные зоны (окна не залезают под бар), клавиатурный фокус для лаунчеров |
+| `wlr-foreign-toplevel-management-v1` | список окон, заголовки/app_id/состояния, управление (activate/close/min/max) |
+| `zxdg-output-manager` (wlroots) | имена/геометрия выходов; обязателен для waybar |
+
+Эксклюзивные зоны слоёв учитываются при максимизации/тайлинге окон
+(`shell_usable_box()` в `src/layer_shell.c`).
+
+## Основная оболочка: QuickShell (`ui/quickshell/`)
+
+Установлена в системе (`qs`, пакет noctalia-qs). Состав:
+
+- `TopBar.qml` — верхний менюбар macOS Sequoia: кнопка-лаунчер,
+  File/Edit/View/Help, в центре имя активного окна, справа громкость
+  (wpctl), батарея (UPower), трей (StatusNotifier), часы.
+- `Dock.qml` — нижний док: лаунчер + иконки всех открытых окон
+  (`ToplevelManager`); клик — фокус, средняя кнопка — закрыть, точка =
+  сфокусированное окно. Иконки резолвятся из .desktop
+  (`DesktopEntries.heuristicLookup`).
+- `Launcher.qml` — встроенный лаунчер приложений (поиск по .desktop,
+  Enter/клик — запуск; внешних wofi/rofi в системе нет).
+- `ShellState.qml` + `qmldir` — общее состояние (открыт ли лаунчер).
+
+Запуск внутри сессии DE:
+
 ```bash
-# Arch Linux
-sudo pacman -S python-pyside6 qt6-quick qt6-dbus
-
-# Или через pip
-pip install PySide6
+qs -p ui/quickshell        # или абсолютный путь
 ```
 
-## Запуск Dock UI (тестовый режим без C++ ядра)
+Автозапуск: в `config.toml` указано `start = "qs -p ui/quickshell"` —
+композитор сам запускает оболочку при старте (после создания сокета,
+путь относителен каталогу запуска DE). Чтобы отключить — очистите `start`.
+
+Проверено живьём на headless-запуске DE: оба бара мапятся, окно
+alacritty появляется в доке, клики/закрытие работают через
+foreign-toplevel.
+
+## Альтернатива: Waybar (стиль macOS Sequoia)
+
+Ставится в систему отдельно:
+
 ```bash
-cd /workspace/ui
-python dock.py
+sudo pacman -S waybar   # опционально: wofi pavucontrol brightnessctl network-manager-applet bluez-utils
 ```
 
-Окно дока откроется с анимированными иконками. При клике будет логироваться попытка запуска приложения.
-
-## Интеграция с C++ ядром
-
-### 1. Реализация D-Bus сервиса в C++
-Добавьте в ваш C++ код (например, в `src/server.c` или отдельный файл):
-
-```c
-#include <gio/gio.h>
-
-static void handle_launch_app(GDBusMethodInvocation *invocation, const gchar *app_name) {
-    g_print("Launching app: %s\n", app_name);
-    
-    // Здесь код запуска приложения
-    // ...
-    
-    g_dbus_method_invocation_return_value(invocation, g_variant_new("(b)", TRUE));
-}
-
-// Регистрация сервиса при инициализации сервера
-void register_dbus_service(MyWMServer *server) {
-    GDBusNodeInfo *introspection_data = ...; // загрузить из XML
-    
-    g_dbus_proxy_new_for_bus(...);
-}
-```
-
-### 2. Сборка C++ ядра с D-Bus поддержкой
-В `meson.build` добавьте:
-```python
-dependency('glib-2.0')
-dependency('gio-2.0')
-```
-
-### 3. Запуск полного DE
 ```bash
-# Терминал 1: C++ ядро
-./build/de_app
-
-# Терминал 2: PySide6 Dock
-python /workspace/ui/dock.py
-
-# Терминал 3: PySide6 Panel (если есть)
-python /workspace/ui/panel.py
+waybar -c ui/waybar/config.jsonc -s ui/waybar/style.css
 ```
 
-## Настройка дизайна
+Стилизация адаптирована из <https://github.com/kamlendras/waybar-macos-sequoia>
+(MIT): убраны Hyprland/Sway-модули, таскбар работает через foreign-toplevel.
+Также проверено живьём (оба бара + иконки окон).
 
-### В QML (dock.qml)
-- Измените `color: "#CC000000"` для настройки прозрачности панели
-- Настройте `radius: 16` для скругления углов
-- Отрегулируйте параметры `SpringAnimation` для изменения физики анимации
+## AGSv2 (Astal) — план
 
-### В Python (dock.py)
-- Добавьте свои методы в `DockController`
-- Настройте список приложений в `self._apps`
-- Реализуйте обработку сигналов от C++ ядра
+Требует те же два протокола, поддержка уже есть в композиторе.
 
-## Layer Shell для Wayland
-Для позиционирования окна как системной панели поверх всех окон:
+## Отладка
 
-1. Создайте C++ обертку над `wlr-layer-shell`
-2. Скомпилируйте как `.so` библиотеку
-3. Подключите через `ctypes` в Python:
-
-```python
-import ctypes
-
-layer_shell_lib = ctypes.CDLL("./liblayer_shell.so")
-layer_shell_lib.create_layer_surface(window_id, layer="top", anchor="bottom")
-```
-
-## Следующие шаги
-1. ✅ Создан QML файл с пружинными анимациями
-2. ✅ Создан Python контроллер с D-Bus интеграцией
-3. ✅ Создан XML интерфейс для D-Bus
-4. ⬜ Реализовать D-Bus сервис в C++ ядре
-5. ⬜ Добавить Layer Shell обертку для Wayland
-6. ⬜ Создать панель (panel.py) и другие UI компоненты
+- Лог композитора: `[DEBUG] new layer surface: layer=N output=...`.
+- Логи шелла: `/run/user/$UID/quickshell/by-id/<id>/log.qslog`.
+- Если внешний клиент не видит баров — проверить, что глобалы
+  `zwlr_layer_shell_v1` и `zwlr_foreign_toplevel_manager_v1`
+  присутствуют в реестре сессии.
+- Вернуть встроенную оболочку: `[shell] builtin = true` и перезапуск DE.

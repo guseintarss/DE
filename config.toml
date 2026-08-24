@@ -53,6 +53,16 @@ close_slide = 8
 "super+Shift+Right" = "@resize right"
 "super+Shift+Up" = "@resize up"
 "super+Shift+Down" = "@resize down"
+# --- Оболочка ---
+# builtin = true  — менюбар и док рисует сам композитор (bar.c/dock.c).
+# builtin = false — встроенная оболочка выключена; верхнюю панель/док
+#                   рисует внешняя оболочка через layer-shell.
+# start — команда оболочки, запускаемая автоматически при старте DE
+#         (только при builtin = false). Пусто/отсутствует — не запускать.
+[shell]
+builtin = false
+start = "qs -p ui/quickshell"
+
 # --- Дизайн оболочки ---
 # Все цвета: hex "#RRGGBB" или "#RRGGBBAA". Размеры в пикселях.
 # Изменения применяются на лету по SIGHUP: pkill -HUP -x DE

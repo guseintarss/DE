@@ -223,6 +223,12 @@ void config_anim_defaults(struct mywm_server *server) {
     server->animations_cfg.close_slide = EFFECTS_CLOSE_SLIDE;
 }
 
+/* Дефолты секций [shell] (переопределяются config.toml). */
+void config_shell_defaults(struct mywm_server *server) {
+    server->shell_cfg.builtin = true;
+    server->shell_cfg.start = NULL;
+}
+
 /* --- [design]: единый источник цветов и метрик оболочки --- */
 
 static void design_defaults(struct design_config *d) {
@@ -509,6 +515,22 @@ static void config_parse_animations(struct mywm_server *server,
             server->animations_cfg.close_slide);
 }
 
+static void config_parse_shell(struct mywm_server *server,
+                               toml_table_t *tab) {
+    toml_datum_t builtin = toml_bool_in(tab, "builtin");
+    if (builtin.ok) {
+        server->shell_cfg.builtin = builtin.u.b;
+    }
+    toml_datum_t start = toml_string_in(tab, "start");
+    if (start.ok && start.u.s[0] != '\0') {
+        free(server->shell_cfg.start);
+        server->shell_cfg.start = strdup(start.u.s);
+    }
+    wlr_log(WLR_INFO, "config: shell builtin=%d start='%s'",
+            server->shell_cfg.builtin,
+            server->shell_cfg.start ? server->shell_cfg.start : "");
+}
+
 void config_load(struct mywm_server *server, const char *path) {
     if (path == NULL) {
         return;
@@ -568,6 +590,10 @@ void config_load(struct mywm_server *server, const char *path) {
     toml_table_t *animations = toml_table_in(root, "animations");
     if (animations != NULL) {
         config_parse_animations(server, animations);
+    }
+    toml_table_t *shell = toml_table_in(root, "shell");
+    if (shell != NULL) {
+        config_parse_shell(server, shell);
     }
     toml_table_t *design = toml_table_in(root, "design");
     if (design != NULL) {

@@ -14,6 +14,7 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
@@ -120,8 +121,10 @@ static void server_new_output(struct wl_listener *listener, void *data) {
     wl_list_insert(&server->outputs, &output->link);
     wlr_output_layout_add_auto(server->output_layout, wlr_output);
 
-    /* Оболочка привязана к layout: пересчитать док и менюбар под новый
-     * выход (dock_init/bar_init выполняются до появления мониторов). */
+    /* Оболочка привязана к layout: пересчитать слои/полезную область и
+     * встроенную оболочку под новый выход (dock_init/bar_init выполняются
+     * до появления мониторов). */
+    arrange_layers(server);
     dock_refresh(server);
     bar_update_name(server);
 
@@ -211,6 +214,11 @@ void server_init(struct mywm_server *server) {
     server->output_layout = wlr_output_layout_create(server->wl_display);
     server->scene = wlr_scene_create();
 
+    /* Слои zwlr-layer-shell и дерево окон: создаются сразу после сцены,
+     * чтобы задать Z-порядок (окна между bottom- и top-слоями), до
+     * деревьев встроенной оболочки и до появления выходов/клиентов. */
+    layer_shell_init(server);
+
     server->xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (server->xkb_context == NULL) {
         wlr_log(WLR_ERROR, "Failed to create xkb_context");
@@ -219,6 +227,7 @@ void server_init(struct mywm_server *server) {
     /* Конфиг грузится до обоев: [wallpaper].path влияет на выбор файла. */
     config_load_defaults(server);
     config_anim_defaults(server);
+    config_shell_defaults(server);
     config_load_auto(server);
 
     server->wallpaper = wallpaper_load_auto(server);
@@ -246,6 +255,11 @@ void server_init(struct mywm_server *server) {
     xdg_shell_init(server);
     /* Скриншоты для отладки: grim-совместимые клиенты (wlr-screencopy). */
     wlr_screencopy_manager_v1_create(server->wl_display);
+    /* Имена/геометрия выходов для клиентов waybar и др. (zxdg_output). */
+    wlr_xdg_output_manager_v1_create(server->wl_display,
+                                     server->output_layout);
+    /* Публикация окон для таскбаров/доков внешних оболочек. */
+    foreign_toplevel_init(server);
     dock_init(server);
     bar_init(server);
     apps_menu_init(server);
@@ -279,6 +293,13 @@ void server_run(struct mywm_server *server) {
     if (!wlr_backend_start(server->backend)) {
         wl_display_destroy(server->wl_display);
         exit(1);
+    }
+    /* Автозапуск внешней оболочки (QuickShell и т.п.): сокет уже создан,
+     * WAYLAND_DISPLAY установлен — клиент подключится сразу. */
+    if (!server->shell_cfg.builtin && server->shell_cfg.start != NULL
+            && server->shell_cfg.start[0] != '\0') {
+        wlr_log(WLR_INFO, "autostart shell: %s", server->shell_cfg.start);
+        mywm_spawn(server, server->shell_cfg.start);
     }
     struct wl_event_loop *loop = wl_display_get_event_loop(server->wl_display);
     while (!server->terminate) {

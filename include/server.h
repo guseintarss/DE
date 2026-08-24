@@ -28,6 +28,21 @@ enum mywm_cursor_mode {
     MYWM_CURSOR_RESIZE,
 };
 
+/* Количество слоёв zwlr-layer-shell (background, bottom, top, overlay). */
+#define SHELL_LAYER_COUNT 4
+
+/*
+ * Поверхность layer-shell (waybar, AGSv2, QuickShell и т.п.). Описание
+ * в src/layer_shell.c; списки хранит mywm_server.layer_lists.
+ */
+struct mywm_layer_surface;
+
+/*
+ * Хэндл окна для wlr-foreign-toplevel-management (список окон для
+ * таскбаров/доков внешних оболочек). Описание в src/foreign_toplevel.c.
+ */
+struct mywm_ftl_toplevel;
+
 /* Невидимая хит-зона ресайза по краям окна. */
 #define RESIZE_HIT 6
 /* Отступ кнопок управления слева в заголовке. */
@@ -139,6 +154,10 @@ struct mywm_server {
     struct wallpaper_config wallpaper_cfg;
     struct animations_config animations_cfg;
 
+    /* Оболочка ([shell]): builtin=false отключает встроенные менюбар и
+     * док (их место занимает внешняя оболочка через layer-shell). */
+    struct shell_config shell_cfg;
+
     /* Дизайн оболочки ([design]): цвета/метрики менюбара, дока,
      * декораций окон. Применяется на лету по SIGHUP. */
     struct design_config design;
@@ -165,6 +184,23 @@ struct mywm_server {
     struct mywm_bar bar;
     /* Полноэкранное меню приложений (Launchpad), создаётся в apps_menu_init. */
     struct mywm_apps_menu *apps_menu;
+
+    /* --- Внешняя оболочка: zwlr-layer-shell + foreign-toplevel --- */
+    /* Глобальные деревья слоёв сцены. Порядок создания задаёт Z-порядок:
+     * background < bottom < view_tree < top < overlay. */
+    struct wlr_scene_tree *layer_trees[SHELL_LAYER_COUNT];
+    /* Списки поверхностей по слоям (struct mywm_layer_surface::link). */
+    struct wl_list layer_lists[SHELL_LAYER_COUNT];
+    struct wlr_layer_shell_v1 *layer_shell;
+    /* Дерево декораций всех xdg-окон (между bottom- и top-слоями). */
+    struct wlr_scene_tree *view_tree;
+    /* Суммарные эксклюзивные зоны layer-поверхностей по краям layout
+     * (пересчитываются в arrange_layers). */
+    int reserved_top, reserved_bottom, reserved_left, reserved_right;
+    struct wlr_foreign_toplevel_manager_v1 *ftl_manager;
+    struct wl_list ftl_toplevels;   /* struct mywm_ftl_toplevel::link */
+
+    struct wl_listener new_layer_surface;
 
     struct wl_list outputs;
     struct wl_list views;
@@ -386,7 +422,8 @@ void mywm_spawn(struct mywm_server *server, const char *command);
 void apps_menu_init(struct mywm_server *server);
 void apps_menu_toggle(struct mywm_server *server);
 bool apps_menu_is_open(const struct mywm_server *server);
-void apps_menu_scroll(struct mywm_server *server, double delta);
+void apps_menu_scroll(struct mywm_server *server, double delta,
+                      uint32_t source);
 /* Клик при открытом меню: запуск приложения под курсором либо закрытие.
  * Всегда поглощает клик (возвращает true). */
 bool apps_menu_click(struct mywm_server *server, double lx, double ly);
@@ -465,5 +502,28 @@ void mywm_btn_recreate(struct wlr_scene_tree *parent, struct mywm_btn *btn,
 /* Применяет server->design ко всем живым нодам: декорации окон, хром,
  * кнопки, менюбар, док. Вызывается после config_design_reload (SIGHUP). */
 void design_apply(struct mywm_server *server);
+
+/* --- layer_shell.c --- */
+/* Глобальные деревья слоёв, менеджер zwlr-layer-shell, обработка новых
+ * layer-поверхностей. Вызывать сразу после создания сцены. */
+void layer_shell_init(struct mywm_server *server);
+/* Пересобрать расположение всех layer-поверхностей и полезную область
+ * (вызывается при map/unmap/commit слоёв и появлении выхода). */
+void arrange_layers(struct mywm_server *server);
+/* Полезная область layout: layout минус эксклюзивные зоны слоёв и
+ * встроенный менюбар (если [shell].builtin). */
+struct wlr_box shell_usable_box(struct mywm_server *server);
+/* Пере-разместить максимизированные/тайленные окна под новую полезную
+ * область. Вызывается после её изменения. */
+void shell_relayout(struct mywm_server *server);
+
+/* --- foreign_toplevel.c --- */
+void foreign_toplevel_init(struct mywm_server *server);
+/* Жизненный цикл хэндла окна: создание при map, закрытие при unmap/
+ * destroy, обновление title/app_id/state по мере изменения. */
+void foreign_toplevel_map(struct mywm_view *view);
+void foreign_toplevel_unmap(struct mywm_view *view);
+void foreign_toplevel_title(struct mywm_view *view);
+void foreign_toplevel_state(struct mywm_view *view);
 
 #endif

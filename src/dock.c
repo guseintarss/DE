@@ -314,6 +314,9 @@ static void dock_layout(struct mywm_server *server) {
 
 void dock_update(struct mywm_server *server) {
     struct mywm_dock *dock = &server->dock;
+    if (dock->tree == NULL) {
+        return;
+    }
     dock_sizes(server);
     bool need_anim = false;
     struct mywm_dock_item *it;
@@ -331,6 +334,9 @@ void dock_update(struct mywm_server *server) {
 }
 
 void dock_refresh(struct mywm_server *server) {
+    if (server->dock.tree == NULL) {
+        return;
+    }
     dock_layout(server);
 }
 
@@ -362,6 +368,13 @@ static void dock_item_make_icons(struct mywm_server *server,
 
 void dock_init(struct mywm_server *server) {
     server->dock.server = server;
+    wl_list_init(&server->dock.items);
+    if (!server->shell_cfg.builtin) {
+        /* Внешняя оболочка ([shell].builtin=false): док не создаём.
+         * Список items инициализирован — genie-анимация и хуки окон
+         * остаются безопасными. */
+        return;
+    }
     const struct design_config *d = &server->design;
     server->dock.tree = wlr_scene_tree_create(&server->scene->tree);
     server->dock.bar = wlr_scene_rect_create(server->dock.tree, 0, 0,
@@ -378,7 +391,6 @@ void dock_init(struct mywm_server *server) {
                                              DOCK_DOT_W, DOCK_DOT_H,
                                              d->dock_dot);
     wlr_scene_node_set_enabled(&server->dock.dot->node, false);
-    wl_list_init(&server->dock.items);
 
     /* Закреплённые лаунчеры — в порядке таблицы слева направо. */
     for (size_t i = 0; i < sizeof(pinned_apps) / sizeof(pinned_apps[0]);
@@ -461,7 +473,11 @@ void dock_resolve_view(struct mywm_server *server, struct mywm_view *view,
     wlr_log(WLR_INFO, "dock: icon reloaded for app_id='%s'", app_id);
 }
 
-void dock_add_view(struct mywm_server *server, struct mywm_view *view) {    const struct design_config *d = &server->design;
+void dock_add_view(struct mywm_server *server, struct mywm_view *view) {
+    if (server->dock.tree == NULL) {
+        return;
+    }
+    const struct design_config *d = &server->design;
     const char *app_id = NULL;
     if (view->xdg_toplevel && view->xdg_toplevel->base) {
         app_id = view->xdg_toplevel->app_id;
@@ -519,11 +535,17 @@ void dock_remove_view(struct mywm_server *server, struct mywm_view *view) {
 
 struct mywm_view *dock_icon_at(struct mywm_server *server,
                                double lx, double ly) {
+    if (server->dock.tree == NULL) {
+        return NULL;
+    }
     struct mywm_dock_item *it = dock_item_at(server, lx, ly);
     return it != NULL ? it->view : NULL;
 }
 
 bool dock_activate_at(struct mywm_server *server, double lx, double ly) {
+    if (server->dock.tree == NULL) {
+        return false;
+    }
     struct mywm_dock_item *it = dock_item_at(server, lx, ly);
     if (it == NULL) {
         return false;
@@ -546,6 +568,9 @@ bool dock_activate_at(struct mywm_server *server, double lx, double ly) {
 }
 
 void dock_raise(struct mywm_server *server) {
+    if (server->dock.tree == NULL) {
+        return;
+    }
     wlr_scene_node_raise_to_top(&server->dock.tree->node);
 }
 /* Повторное применение [design] к доку (SIGHUP): цвета панели,
