@@ -159,13 +159,6 @@ void clamp_view_to_layout(struct mywm_server *server, struct mywm_view *view,
     const struct design_config *d = &server->design;
     const int margin = 20;
 
-    int min_x = layout_box.x + margin;
-    int max_x = layout_box.x + layout_box.width - margin -
-        (int)(view->width + 2 * d->border);
-    int min_y = layout_box.y + margin;
-    int max_y = layout_box.y + layout_box.height - margin -
-        (int)(view->height + d->title_h + 2 * d->border);
-
     /* Окно шире/выше layout: прижимаем левый/верхний край к началу layout. */
     if (min_x > max_x) {
         min_x = max_x = layout_box.x;
@@ -244,7 +237,6 @@ static void process_cursor_resize(struct mywm_server *server) {
     }
 
 
-    wlr_xdg_toplevel_set_size(view->xdg_toplevel,
                               new_right - new_left, new_bottom - new_top);
     wlr_log(WLR_DEBUG, "cursor resize: view=%p size=%dx%d",
             (void *)view, new_right - new_left, new_bottom - new_top);
@@ -372,10 +364,6 @@ void begin_interactive(struct mywm_view *view,
         server->grab_start_x = server->cursor->x;
         server->grab_start_y = server->cursor->y;
     } else {
-        const struct design_config *d = &view->server->design;
-        int content_x = view->x + d->border;
-        int content_y = view->y + d->title_h + d->border;
-        struct wlr_box geo_box = view->xdg_toplevel->base->geometry;
 
         double border_x = content_x +
             ((edges & WLR_EDGE_RIGHT) ? geo_box.width : 0);
