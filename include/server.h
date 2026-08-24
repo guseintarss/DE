@@ -27,19 +27,11 @@ enum mywm_cursor_mode {
     MYWM_CURSOR_RESIZE,
 };
 
-/* Декорации окна: граница и заголовок (в пикселях). */
-#define DECO_BORDER 4
-#define DECO_TITLE 28
 /* Невидимая хит-зона ресайза по краям окна. */
 #define RESIZE_HIT 6
-/* Кнопки управления на заголовке (как в macOS: красная/жёлтая/зелёная). */
-#define BTN_SIZE 11
-#define BTN_GAP 6
+/* Отступ кнопок управления слева в заголовке. */
 #define BTN_X 8
-#define BTN_Y ((DECO_TITLE - BTN_SIZE) / 2)
 #define BTN_DOUBLE_CLICK_MS 400
-/* Верхний менюбар: максимизированные окна начинаются ниже него. */
-#define MENU_BAR_HEIGHT 26
 
 enum mywm_title_button {
     MYWM_BTN_NONE,
@@ -125,6 +117,10 @@ struct mywm_server {
     /* Конфигурация этапа 5 ([wallpaper]/[animations] в config.toml). */
     struct wallpaper_config wallpaper_cfg;
     struct animations_config animations_cfg;
+
+    /* Дизайн оболочки ([design]): цвета/метрики менюбара, дока,
+     * декораций окон. Применяется на лету по SIGHUP. */
+    struct design_config design;
 
     /* Общий XKB-контекст для всех клавиатур (создаётся один раз). */
     struct xkb_context *xkb_context;
@@ -334,6 +330,8 @@ void dock_update(struct mywm_server *server);
 struct mywm_view *dock_icon_at(struct mywm_server *server,
                                double lx, double ly);
 void dock_raise(struct mywm_server *server);
+/* Повторное применение [design] к доку. */
+void dock_redesign(struct mywm_server *server);
 
 /* --- icons.c --- */
 void icon_manager_init(struct mywm_icon_manager *mgr,
@@ -359,6 +357,11 @@ void icon_theme_list_free(char **themes);
 void bar_init(struct mywm_server *server);
 void bar_update_name(struct mywm_server *server);
 void bar_raise(struct mywm_server *server);
+/* Повторное применение [design] к менюбару (цвета, кнопки, тексты). */
+void bar_redesign(struct mywm_server *server);
+/* Какая кнопка максимизированного окна в менюбаре под точкой. */
+enum mywm_title_button bar_button_at(struct mywm_server *server,
+                                     double lx, double ly);
 /* Круглая кнопка: буфер с закрашенным кругом и (опционально) глифом. */
 struct mywm_text_buf *mywm_button_buf(int size, const float color[4],
                                       enum mywm_title_button glyph);
@@ -368,5 +371,15 @@ struct mywm_btn mywm_btn_create(struct wlr_scene_tree *parent, int size,
                                 enum mywm_title_button glyph_btn);
 /* Переключает узел кнопки между глифом и обычным кругом. */
 void mywm_button_hover(struct mywm_btn *btn, bool hovered);
+/* Пересоздаёт кнопку с новыми цветом/размером ([design] reload).
+ * Позицию и enabled выставляет вызывающий. */
+void mywm_btn_recreate(struct wlr_scene_tree *parent, struct mywm_btn *btn,
+                       int size, const float color[4],
+                       enum mywm_title_button glyph_btn);
+
+/* --- design.c --- */
+/* Применяет server->design ко всем живым нодам: декорации окон, хром,
+ * кнопки, менюбар, док. Вызывается после config_design_reload (SIGHUP). */
+void design_apply(struct mywm_server *server);
 
 #endif

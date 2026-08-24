@@ -1,4 +1,5 @@
 #include "server.h"
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -11,6 +12,7 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_scene.h>
@@ -29,7 +31,7 @@ static void output_frame_handler(struct wl_listener *listener, void *data) {
 
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    wlr_scene_output_commit(output->scene_output);
+    wlr_scene_output_commit(output->scene_output, NULL);
     wlr_scene_output_send_frame_done(output->scene_output, &now);
 }
 
@@ -61,11 +63,19 @@ static void server_new_output(struct wl_listener *listener, void *data) {
     struct mywm_server *server = wl_container_of(listener, server, new_output);
     struct wlr_output *wlr_output = data;
 
+    struct wlr_output_state state;
+    wlr_output_state_init(&state);
+    /* В wlroots 0.17+ новый вывод создаётся выключенным: без явного
+     * enabled=true кадры (events.frame) не приходят никогда. */
+    wlr_output_state_set_enabled(&state, true);
     struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
     if (mode != NULL) {
-        wlr_output_set_mode(wlr_output, mode);
+        wlr_output_state_set_mode(&state, mode);
     }
-    wlr_output_commit(wlr_output);
+    if (!wlr_output_commit_state(wlr_output, &state)) {
+        wlr_log(WLR_ERROR, "Failed to commit output state: %s", wlr_output->name);
+    }
+    wlr_output_state_finish(&state);
 
     struct mywm_output *output = calloc(1, sizeof(struct mywm_output));
     if (output == NULL) {
@@ -83,18 +93,18 @@ static void server_new_output(struct wl_listener *listener, void *data) {
     }
 
     /* Субдерево обоев: самый нижний слой (ниже всех окон). */
-    output->bg_tree = wlr_scene_tree_create(&server->scene->node);
+    output->bg_tree = wlr_scene_tree_create(&server->scene->tree);
     wlr_scene_node_lower_to_bottom(&output->bg_tree->node);
 
     struct wlr_scene_node *background_node;
     if (server->wallpaper != NULL) {
         output->background = wlr_scene_buffer_create(
-                &output->bg_tree->node, server->wallpaper->buffer);
+                output->bg_tree, server->wallpaper->buffer);
         background_node = &output->background->node;
     } else {
         float bg_color[4] = {0.08f, 0.09f, 0.16f, 1.0f};
         output->background_fallback = wlr_scene_rect_create(
-                &output->bg_tree->node,
+                output->bg_tree,
                 wlr_output->width, wlr_output->height,
                 bg_color);
         background_node = &output->background_fallback->node;
@@ -194,19 +204,35 @@ static void add_headless_outputs(struct mywm_server *server) {
     }
 }
 
+/* SIGHUP: перечитать [design] и применить к живой сцене. */
+static int handle_sighup(int signal_number, void *data) {
+    struct mywm_server *server = data;
+    if (signal_number != SIGHUP) {
+        return 0;
+    }
+    if (!config_design_reload(server)) {
+        wlr_log(WLR_ERROR, "design reload failed, keeping previous design");
+        return 0;
+    }
+    design_apply(server);
+    return 0;
+}
+
 void server_init(struct mywm_server *server) {
     wlr_log_init(WLR_DEBUG, NULL);
 
     server->wl_display = wl_display_create();
-    server->backend = wlr_backend_autocreate(server->wl_display);
+    server->backend = wlr_backend_autocreate(
+            wl_display_get_event_loop(server->wl_display), NULL);
     server->renderer = wlr_renderer_autocreate(server->backend);
     wlr_renderer_init_wl_display(server->renderer, server->wl_display);
 
     add_headless_outputs(server);
 
     server->allocator = wlr_allocator_autocreate(server->backend, server->renderer);
-    server->compositor = wlr_compositor_create(server->wl_display, server->renderer);
-    server->output_layout = wlr_output_layout_create();
+    server->compositor = wlr_compositor_create(server->wl_display, 6,
+                                               server->renderer);
+    server->output_layout = wlr_output_layout_create(server->wl_display);
     server->scene = wlr_scene_create();
 
     server->xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -231,6 +257,12 @@ void server_init(struct mywm_server *server) {
     server->cursor_mode = MYWM_CURSOR_PASSTHROUGH;
 
     server->seat = wlr_seat_create(server->wl_display, "seat0");
+
+    /* SIGHUP: перечитать [design] из config.toml и применить на лету
+     * (pkill -HUP -x DE). */
+    struct wl_event_loop *init_loop =
+        wl_display_get_event_loop(server->wl_display);
+    wl_event_loop_add_signal(init_loop, SIGHUP, handle_sighup, server);
 
     /* Модули этапа 3: курсор (ввод) и xdg-shell (окна). Создают свои
      * wlr-объекты и регистрируют listeners. */

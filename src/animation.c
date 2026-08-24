@@ -34,6 +34,12 @@ bool spring_step(struct spring_anim *s, double dt) {
     if (!s->active) {
         return false;
     }
+    /* Явный Эйлер нестабилен при больших dt (затык event loop): без
+     * клампа пружина "взрывается" и уводит opacity/размеры за ассерты
+     * wlroots. */
+    if (dt > 0.05) {
+        dt = 0.05;
+    }
     s->velocity += (s->target - s->current) * s->stiffness * dt;
     s->velocity -= s->velocity * s->damping * dt;
     s->current += s->velocity * dt;

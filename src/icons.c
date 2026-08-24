@@ -5,8 +5,10 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <cairo/cairo.h>
+#include <drm_fourcc.h>
+#include <wlr/interfaces/wlr_buffer.h>
+#include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_scene.h>
-#include <wlr/render/wlr_renderer.h>
 #include <wlr/util/log.h>
 
 /* Стандартные пути для иконок в Linux */
@@ -176,52 +178,80 @@ static cairo_surface_t *load_image_from_file(const char *filename, int size) {
     return surface;
 }
 
-/* Создание текстуры wlroots из Cairo поверхности */
+/* Создание scene-буфера из Cairo поверхности (wlroots 0.20: текстуры
+ * загружаются через wlr_buffer с data-ptr доступом, см. effects.c). */
+struct mywm_icon_buf {
+    struct wlr_buffer base;
+    cairo_surface_t *surface;
+};
+
+static void icon_buf_destroy(struct wlr_buffer *wb) {
+    struct mywm_icon_buf *buf = wl_container_of(wb, buf, base);
+    cairo_surface_destroy(buf->surface);
+    free(buf);
+}
+
+static bool icon_buf_begin_data_ptr_access(struct wlr_buffer *wb,
+                                           uint32_t flags, void **data,
+                                           uint32_t *format, size_t *stride) {
+    (void)flags;
+    struct mywm_icon_buf *buf = wl_container_of(wb, buf, base);
+    cairo_surface_flush(buf->surface);
+    *data = cairo_image_surface_get_data(buf->surface);
+    if (*data == NULL) {
+        return false;
+    }
+    *format = DRM_FORMAT_ARGB8888;
+    *stride = (size_t)cairo_image_surface_get_stride(buf->surface);
+    return true;
+}
+
+static void icon_buf_end_data_ptr_access(struct wlr_buffer *wb) {
+    (void)wb;
+}
+
+static const struct wlr_buffer_impl icon_buf_impl = {
+    .destroy = icon_buf_destroy,
+    .begin_data_ptr_access = icon_buf_begin_data_ptr_access,
+    .end_data_ptr_access = icon_buf_end_data_ptr_access,
+};
+
 static struct wlr_scene_buffer *create_texture_from_cairo(
     struct mywm_icon_manager *mgr,
     struct wlr_scene_tree *parent,
     cairo_surface_t *surface,
     int size) {
-    
-    if (!surface || !mgr || !parent) {
+
+    if (!surface || !mgr || !parent ||
+        cairo_image_surface_get_width(surface) == 0) {
         return NULL;
     }
-    
-    int width = cairo_image_surface_get_width(surface);
-    int height = cairo_image_surface_get_height(surface);
-    unsigned char *data = cairo_image_surface_get_data(surface);
-    
-    if (!data) {
+
+    struct mywm_icon_buf *ib = calloc(1, sizeof(*ib));
+    if (!ib) {
         return NULL;
     }
-    
-    /* Создаем текстуру напрямую через wlr_texture_from_pixels */
-    struct wlr_texture *texture = wlr_texture_from_pixels(
-        mgr->renderer, WL_SHM_FORMAT_ARGB8888, 
-        cairo_image_surface_get_stride(surface),
-        width, height, data);
-    
-    if (!texture) {
-        return NULL;
-    }
-    
-    /* Создаём scene_buffer с текстурой */
+    ib->surface = cairo_surface_reference(surface);
+    wlr_buffer_init(&ib->base, &icon_buf_impl,
+                    cairo_image_surface_get_width(surface),
+                    cairo_image_surface_get_height(surface));
+
+    /* Устанавливаем размер отображения */
     struct wlr_scene_buffer *scene_buf = wlr_scene_buffer_create(parent, NULL);
     if (!scene_buf) {
-        wlr_texture_destroy(texture);
+        wlr_buffer_drop(&ib->base);
         return NULL;
     }
-    
-    /* Устанавливаем текстуру в buffer */
-    wlr_scene_buffer_set_texture(scene_buf, texture);
-    
-    /* Устанавливаем размер */
+    wlr_scene_buffer_set_buffer(scene_buf, &ib->base);
     wlr_scene_buffer_set_dest_size(scene_buf, size, size);
-    
+
+    /* Ссылка сцены держит буфер живым; наша ссылка больше не нужна */
+    wlr_buffer_drop(&ib->base);
+
     /* Освобождаем Cairo поверхность */
     cairo_surface_flush(surface);
     cairo_surface_destroy(surface);
-    
+
     return scene_buf;
 }
 
