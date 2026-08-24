@@ -25,16 +25,52 @@
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 
+/* Отладка темпа кадров: включается переменной окружения MYWM_FPS=1. */
+static bool fps_debug_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        enabled = getenv("MYWM_FPS") != NULL;
+    }
+    return enabled;
+}
+
 static void output_frame_handler(struct wl_listener *listener, void *data) {
     struct mywm_output *output = wl_container_of(listener, output, frame);
     (void)data;
 
+    /* TEMP: измерение фактического темпа кадров (раз в секунду). */
+    static time_t last_sec = 0;
+    static int frame_count = 0;
+    bool fps_debug = fps_debug_enabled();
+    if (fps_debug) {
+        frame_count++;
+        struct timespec ts_now;
+        clock_gettime(CLOCK_MONOTONIC, &ts_now);
+        if (ts_now.tv_sec != last_sec) {
+            if (last_sec != 0) {
+                wlr_log(WLR_INFO, "[fps] %s: %d", output->wlr_output->name,
+                        frame_count);
+            }
+            last_sec = ts_now.tv_sec;
+            frame_count = 0;
+        }
+    }
+
     wallpaper_apply(output->server, output);
+
+    /* Тик spring-анимаций в такт vblank'у — до коммита, чтобы кадр нёс
+     * свежее состояние пружин (гладкие 60 Гц без джаддера). */
+    bool anim_more = animations_frame_step(output->server);
 
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     wlr_scene_output_commit(output->scene_output, NULL);
     wlr_scene_output_send_frame_done(output->scene_output, &now);
+
+    /* Пока анимации активны — заказываем следующий кадр развёртки. */
+    if (anim_more) {
+        wlr_output_schedule_frame(output->wlr_output);
+    }
 }
 
 static void output_destroy_handler(struct wl_listener *listener, void *data) {

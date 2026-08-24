@@ -3,12 +3,15 @@
 #include <math.h>
 #include <stdlib.h>
 #include <time.h>
+#include <wlr/types/wlr_output.h>
 #include <wlr/util/log.h>
 
 /*
- * Spring-анимации в стиле macOS. ОДИН глобальный wl_event_source на
- * композитор (~60 FPS) проходит по всем view с активными пружинами;
- * когда не осталось активных анимаций, таймер останавливается.
+ * Spring-анимации в стиле macOS. Такт анимаций привязан к vblank'у:
+ * output_frame_handler вызывает animations_frame_step() перед коммитом
+ * каждого кадра (см. server.c), а view_effects_start_anim заказывает
+ * кадры через wlr_output_schedule_frame. Сторожевой таймер страхует на
+ * случай, если кадры перестают приходить (нет активных выходов).
  *
  * В wlroots 0.20 нет wlr_scene_node_set_scale/opacity (только
  * wlr_scene_buffer_set_opacity), поэтому "живость" открытия дают
@@ -190,17 +193,41 @@ static void apply_view_transforms(struct mywm_view *view) {
     }
 }
 
-/*
- * Тик глобального таймера: шаг всех активных пружин с фактическим dt
- * (с клампом). Когда пружины view затухли: завершаем трансформацию,
- * либо (при закрытии) выполняем финальный destroy. Когда активных
- * анимаций не осталось, таймер останавливается.
- */
-static int animation_tick(void *data) {
-    struct mywm_server *server = data;
+/* Есть ли хотя бы одно окно с активной анимацией. */
+static bool animations_active(struct mywm_server *server) {
+    struct mywm_view *view;
+    wl_list_for_each(view, &server->views, link) {
+        if (view->anim_active) {
+            return true;
+        }
+    }
+    return false;
+}
 
+/*
+ * Шаг всех активных пружин с фактическим dt (с клампом). Когда пружины
+ * view затухли: завершаем трансформацию, либо (при закрытии) выполняем
+ * финальный destroy. Возвращает true, если анимации ещё идут.
+ *
+ * Основной такт — vblank (animations_frame_step из output_frame_handler):
+ * обновления попадают ровно на кадр развёртки. Сторожевой таймер
+ * (animation_tick) продвигает анимации только если кадры перестали
+ * приходить (нет активных выходов).
+ */
+static bool animation_step_all(struct mywm_server *server) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
+
+    /* Защита от двойного тика (близкие flip'ы нескольких мониторов):
+     * слишком частые шаги не меняют картинку, но гоняют regen хрома. */
+    if (server->anim_last.tv_sec != 0 || server->anim_last.tv_nsec != 0) {
+        double since = (now.tv_sec - server->anim_last.tv_sec) +
+            (now.tv_nsec - server->anim_last.tv_nsec) / 1e9;
+        if (since < EFFECTS_ANIM_MIN_STEP_MS / 1000.0) {
+            return animations_active(server);
+        }
+    }
+
     double dt = 1.0 / 60.0;
     if (server->anim_last.tv_sec != 0 || server->anim_last.tv_nsec != 0) {
         dt = (now.tv_sec - server->anim_last.tv_sec) +
@@ -210,8 +237,8 @@ static int animation_tick(void *data) {
     if (dt < 1e-4) {
         dt = 1e-4;
     }
-    /* Цикл событий диспатчится раз в 100 мс — разрешаем шаг до 1/10,
-     * иначе анимации идут вдвое медленнее реального времени. */
+    /* Сторожевой тик может прийти через большой интервал — клампим,
+     * иначе анимации «перепрыгивают» кусок пути за один шаг. */
     if (dt > 1.0 / 10.0) {
         dt = 1.0 / 10.0;
     }
@@ -257,6 +284,16 @@ static int animation_tick(void *data) {
         wlr_log(WLR_DEBUG, "animations settled: view=%p", (void *)view);
     }
 
+    return any_active;
+}
+
+/* Сторожевой таймер: основной такт даёт vblank. Если кадры не идут
+ * дольше EFFECTS_ANIM_WATCHDOG_MS — продвигаем анимации отсюда, чтобы
+ * окна не зависали в середине пружины. */
+static int animation_tick(void *data) {
+    struct mywm_server *server = data;
+
+    bool any_active = animation_step_all(server);
     if (!any_active) {
         if (server->anim_timer != NULL) {
             wl_event_source_remove(server->anim_timer);
@@ -264,9 +301,22 @@ static int animation_tick(void *data) {
         }
         return 0;
     }
-    /* Таймер в libwayland одноразовый: перезаводим на следующий кадр. */
-    wl_event_source_timer_update(server->anim_timer, EFFECTS_ANIM_INTERVAL_MS);
+    wl_event_source_timer_update(server->anim_timer,
+                                 EFFECTS_ANIM_WATCHDOG_MS);
     return 0;
+}
+
+bool animations_frame_step(struct mywm_server *server) {
+    bool any_active = animations_active(server);
+    if (!any_active) {
+        /* Анимации закончились — сторожевой таймер больше не нужен. */
+        if (server->anim_timer != NULL) {
+            wl_event_source_remove(server->anim_timer);
+            server->anim_timer = NULL;
+        }
+        return false;
+    }
+    return animation_step_all(server);
 }
 
 void animations_init(struct mywm_server *server) {
@@ -293,6 +343,7 @@ void view_effects_start_anim(struct mywm_view *view) {
     if (view->server->anim_timer == NULL) {
         struct wl_event_loop *loop =
             wl_display_get_event_loop(view->server->wl_display);
+        /* Сторожевой таймер: основной такт — vblank, таймер страхует. */
         view->server->anim_timer =
             wl_event_loop_add_timer(loop, animation_tick, view->server);
     }
@@ -300,7 +351,14 @@ void view_effects_start_anim(struct mywm_view *view) {
     clock_gettime(CLOCK_MONOTONIC, &now);
     view->server->anim_last = now;
     wl_event_source_timer_update(view->server->anim_timer,
-                                 EFFECTS_ANIM_INTERVAL_MS);
+                                 EFFECTS_ANIM_WATCHDOG_MS);
+
+    /* Заказать кадры на всех выходах: такт анимаций пойдёт от
+     * output_frame_handler ровно в такт развёртки монитора. */
+    struct mywm_output *o;
+    wl_list_for_each(o, &view->server->outputs, link) {
+        wlr_output_schedule_frame(o->wlr_output);
+    }
 }
 
 void view_effects_stop_anim(struct mywm_view *view) {

@@ -16,6 +16,8 @@
  */
 #include "server.h"
 #include <stdlib.h>
+#include <time.h>
+#include <string.h>
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_scene.h>
@@ -28,6 +30,15 @@ struct mywm_layer_surface {
     struct wlr_output *output;
     struct wlr_layer_surface_v1 *surface;
     struct wlr_scene_layer_surface_v1 *scene_layer;
+    /* Кэш состояния на момент последней раскладки: если commit не
+     * изменил ни одно из этих полей, rearrange не нужен. Без этого
+     * configure->commit->configure образует петлю, и клиент рисует
+     * без остановки (джаддер + расход батареи). */
+    uint32_t cached_anchor;
+    int32_t cached_exclusive_zone;
+    int32_t cached_margin[4];               /* top/right/bottom/left */
+    uint32_t cached_exclusive_edge;
+    uint32_t cached_desired_w, cached_desired_h;
     struct wl_listener map;
     struct wl_listener unmap;
     struct wl_listener commit;
@@ -37,6 +48,34 @@ struct mywm_layer_surface {
 
 static int imax(int a, int b) {
     return a > b ? a : b;
+}
+
+/* Изменилось ли состояние поверхности, влияющее на раскладку,
+ * с момента последнего arrange_layers. */
+static bool layer_layout_changed(const struct mywm_layer_surface *ls) {
+    const struct wlr_layer_surface_v1_state *st = &ls->surface->current;
+    return st->anchor != ls->cached_anchor ||
+        st->exclusive_zone != ls->cached_exclusive_zone ||
+        st->margin.top != ls->cached_margin[0] ||
+        st->margin.right != ls->cached_margin[1] ||
+        st->margin.bottom != ls->cached_margin[2] ||
+        st->margin.left != ls->cached_margin[3] ||
+        st->exclusive_edge != ls->cached_exclusive_edge ||
+        st->desired_width != ls->cached_desired_w ||
+        st->desired_height != ls->cached_desired_h;
+}
+
+static void layer_cache_update(struct mywm_layer_surface *ls) {
+    const struct wlr_layer_surface_v1_state *st = &ls->surface->current;
+    ls->cached_anchor = st->anchor;
+    ls->cached_exclusive_zone = st->exclusive_zone;
+    ls->cached_margin[0] = st->margin.top;
+    ls->cached_margin[1] = st->margin.right;
+    ls->cached_margin[2] = st->margin.bottom;
+    ls->cached_margin[3] = st->margin.left;
+    ls->cached_exclusive_edge = st->exclusive_edge;
+    ls->cached_desired_w = st->desired_width;
+    ls->cached_desired_h = st->desired_height;
 }
 
 struct wlr_box shell_usable_box(struct mywm_server *server) {
@@ -155,6 +194,7 @@ static void layer_keyboard_focus(struct mywm_layer_surface *ls) {
 static void layer_map_handler(struct wl_listener *listener, void *data) {
     struct mywm_layer_surface *ls = wl_container_of(listener, ls, map);
     (void)data;
+    layer_cache_update(ls);
     arrange_layers(ls->server);
     layer_keyboard_focus(ls);
 }
@@ -174,9 +214,17 @@ static void layer_unmap_handler(struct wl_listener *listener, void *data) {
 static void layer_commit_handler(struct wl_listener *listener, void *data) {
     struct mywm_layer_surface *ls = wl_container_of(listener, ls, commit);
     (void)data;
-    /* Первый commit: клиент ждёт configure с размером — его вышлет
-     * arrange_layers (конфигурируем все поверхности слоя). */
-    arrange_layers(ls->server);
+
+    /* Пересобираем раскладку ТОЛЬКО когда состояние, влияющее на неё,
+     * изменилось. Configure по каждому коммиту создаёт петлю
+     * configure→commit→configure: клиент перерисовывается без остановки
+     * (лишняя нагрузка на GPU/CPU, джаддер анимаций). Первый commit
+     * всегда проходит здесь (кэш нулевой), так клиент получает свой
+     * первый configure и сможет отмапиться. */
+    if (layer_layout_changed(ls)) {
+        layer_cache_update(ls);
+        arrange_layers(ls->server);
+    }
     layer_keyboard_focus(ls);
 }
 

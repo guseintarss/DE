@@ -8,9 +8,14 @@
 struct mywm_server;
 struct mywm_view;
 
-/* Один глобальный timer на композитор (~16 мс) ведёт spring-анимации
- * всех окон: opacity, slide (Y), hover и трансформации (maximize/genie). */
-#define EFFECTS_ANIM_INTERVAL_MS 16
+/* Spring-анимации тикают в такт vblank'у (frame events, см.
+ * animations_frame_step), чтобы обновления попадали ровно на кадр
+ * развёртки (~60 Гц) без джаддера. Таймер ниже — только сторожевой
+ * фолбэк на случай, если кадры не приходят (нет активных выходов). */
+#define EFFECTS_ANIM_WATCHDOG_MS 100
+/* Минимальный интервал между шагами анимаций: защищает от двойных
+ * тиков при близких flip'ах нескольких мониторов. */
+#define EFFECTS_ANIM_MIN_STEP_MS 5
 
 /* Параметры spring-физики в стиле macOS (iOS spring):
  * velocity += (target - current) * stiffness * dt
@@ -60,6 +65,10 @@ bool spring_settled(const struct spring_anim *s);
  * удаляется в server_finish. */
 void animations_init(struct mywm_server *server);
 void animations_finish(struct mywm_server *server);
+/* Шаг всех активных пружин, привязанный к кадру (вызывается из
+ * output_frame_handler перед коммитом). Возвращает true, если есть
+ * активные анимации и нужен следующий кадр (wlr_output_schedule_frame). */
+bool animations_frame_step(struct mywm_server *server);
 /* Запуск/остановка анимации конкретного view (открытие, закрытие, hover). */
 void view_effects_start_anim(struct mywm_view *view);
 void view_effects_stop_anim(struct mywm_view *view);

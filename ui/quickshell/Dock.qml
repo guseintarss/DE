@@ -6,308 +6,255 @@ import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Widgets
 
-// Нижний док macOS Sequoia: кнопка лаунчера + закреплённые лаунчеры
-// (терминал, браузер, файлы) + иконки открытых окон
-// (zwlr-foreign-toplevel). Клик по окну — фокус/поднять, средняя кнопка —
-// закрыть. Точка под иконкой — сфокусированное окно.
 PanelWindow {
     id: root
 
     anchors {
         bottom: true
-        left: true
-        right: true
     }
-    implicitHeight: 58
+    // Якорь только снизу: композитор сам центрирует окно по горизонтали.
+    // Ширина с запасом — видимая «капсула» дока центрируется внутри сама.
+    implicitWidth: 900
+    implicitHeight: 70
+
+    // Плавающая капсула поверх окон; место снизу резервирует
+    // ExclusionMode.Auto.
+    WlrLayershell.layer: WlrLayer.Top
     color: "transparent"
     exclusionMode: ExclusionMode.Auto
 
-    readonly property string iconFont: "MesloLGLDZ Nerd Font"
+    readonly property string iconFont: "SF Pro Display, Segoe UI, sans-serif"
 
-    // Закреплённые лаунчеры: всегда в доке слева от открытых окон.
-    // fallback — имя из темы иконок, если .desktop не нашёлся.
     readonly property var pinnedApps: [
-        {
-            appId: "Alacritty",
-            name: "Терминал",
-            cmd: ["alacritty"],
-            fallback: "utilities-terminal"
-        },
-        {
-            appId: "zen",
-            name: "Zen Browser",
-            cmd: ["zen-browser"],
-            fallback: "zen-browser"
-        },
-        {
-            appId: "org.gnome.Nautilus",
-            name: "Файлы",
-            cmd: ["nautilus"],
-            fallback: "org.gnome.Nautilus"
-        }
+        { appId: "Alacritty", name: "Т_TERMINAL", cmd: ["alacritty"], fallback: "utilities-terminal" },
+        { appId: "zen", name: "Zen Browser", cmd: ["zen-browser"], fallback: "zen-browser" },
+        { appId: "org.gnome.Nautilus", name: "Файлы", cmd: ["nautilus"], fallback: "org.gnome.Nautilus" }
     ]
 
-    // Кэш: appId -> DesktopEntry (для иконок).
     property var entryCache: ({})
 
     function findEntry(appId) {
-        if (!appId)
-            return null;
-        if (entryCache[appId] !== undefined)
-            return entryCache[appId];
+        if (!appId) return null;
+        if (entryCache[appId] !== undefined) return entryCache[appId];
         let entry = null;
-        try {
-            entry = DesktopEntries.heuristicLookup(appId);
-        } catch (e) {
-            entry = null;
-        }
+        try { entry = DesktopEntries.heuristicLookup(appId); } catch (e) {}
         if (!entry) {
             const ids = [appId, appId.toLowerCase()];
             for (let i = 0; i < ids.length && !entry; i++) {
-                try {
-                    entry = DesktopEntries.byId(ids[i]);
-                } catch (e2) {
-                    entry = null;
-                }
+                try { entry = DesktopEntries.byId(ids[i]); } catch (e2) {}
             }
         }
         entryCache[appId] = entry;
         return entry;
     }
 
-    // Иконка для окна/лаунчера: .desktop -> fallback -> само appId.
-    // IconImage не резолвит имена темы сам — через Quickshell.iconPath.
     function iconFor(appId, fallback) {
         const e = findEntry(appId);
-        let name = e && e.icon && e.icon !== "" ? e.icon : "";
-        if (name === "" && fallback && fallback !== "")
-            name = fallback;
-        if (name === "")
-            name = appId || "";
-        if (name === "")
-            return "";
-        try {
-            return Quickshell.iconPath(name, "image-missing");
-        } catch (err) {
-            return name;
-        }
+        let name = (e && e.icon) ? e.icon : "";
+        if (name === "" && fallback) name = fallback;
+        if (name === "") name = appId || "";
+        if (name === "") return "";
+        try { return Quickshell.iconPath(name, "image-missing"); } 
+        catch (err) { return name; }
     }
 
-    // Есть ли среди открытых окон приложение с таким app_id.
     function isRunning(appId) {
         const ts = ToplevelManager.toplevels;
         for (let i = 0; i < ts.values.length; i++) {
-            if (ts.values[i].appId === appId)
-                return true;
+            if (ts.values[i].appId === appId) return true;
         }
         return false;
     }
 
+    // Новая функция для определения активного окна
+    function isActive(appId) {
+        const active = ToplevelManager.activeToplevel;
+        return active && active.appId === appId;
+    }
+
     function launch(cmd) {
-        try {
-            Quickshell.execDetached(cmd);
-            return;
-        } catch (e) {}
+        try { Quickshell.execDetached(cmd); return; } catch (e) {}
         spawner.command = cmd;
         spawner.running = true;
     }
 
-    Process {
-        id: spawner
+    Process { id: spawner }
+
+    // === ЭЛЕМЕНТ ДОКА ===
+    // Inline-компонент: каждый экземпляр в Row ниже получает свою копию
+    // этого дерева. Фиксированный размер предотвращает «дергание» дока.
+    component DockItem: Item {
+        id: dockItemTemplate
+        property string appName: ""
+        property string appIcon: ""
+        property bool isRunning: false
+        property bool isActive: false
+        signal clicked()
+        signal middleClicked()
+
+        width: 56
+        height: 56
+
+        // Фон при наведении
+        Rectangle {
+            anchors.centerIn: parent
+            width: 48
+            height: 48
+            radius: 12
+            color: dockItemArea.containsMouse ? "#33FFFFFF" : "transparent"
+            Behavior on color { ColorAnimation { duration: 150; easing.type: Easing.OutQuad } }
+        }
+
+        // Иконка с МАГНИФИКАЦИЕЙ (macOS style)
+        IconImage {
+            id: iconImg
+            anchors.centerIn: parent
+            width: 40
+            height: 40
+            source: dockItemTemplate.appIcon
+            asynchronous: true
+
+            // Пружинная анимация
+            scale: dockItemArea.containsMouse ? 1.4 : 1.0
+            y: dockItemArea.containsMouse ? -8 : 0
+
+            Behavior on scale {
+                SpringAnimation { spring: 3; damping: 0.5; duration: 300 }
+            }
+            Behavior on y {
+                SpringAnimation { spring: 3; damping: 0.5; duration: 300 }
+            }
+        }
+
+        // Индикатор (точка/капсула)
+        Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 4
+            height: 4
+            radius: 2
+            color: dockItemTemplate.isActive ? "#FFFFFF" : "#88FFFFFF"
+            visible: dockItemTemplate.isRunning
+
+            // Плавное расширение в капсулу для активного окна
+            width: dockItemTemplate.isActive ? 16 : 4
+            Behavior on width {
+                NumberAnimation { duration: 200; easing.type: Easing.OutQuart }
+            }
+        }
+
+        // Всплывающая подсказка
+        ToolTip {
+            visible: dockItemArea.containsMouse && dockItemTemplate.appName !== ""
+            delay: 500
+            text: dockItemTemplate.appName
+            // Стилизация тултипа (работает в большинстве тем)
+            background: Rectangle {
+                color: "#E61C1C1E"
+                border.color: "#33FFFFFF"
+                radius: 6
+            }
+            contentItem: Text {
+                text: parent.text
+                color: "#FFFFFF"
+                font.family: root.iconFont
+                font.pixelSize: 12
+                font.weight: Font.Medium
+            }
+        }
+
+        // Область клика
+        MouseArea {
+            id: dockItemArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+            onClicked: (mouse) => {
+                if (mouse.button === Qt.MiddleButton) {
+                    dockItemTemplate.middleClicked();
+                } else {
+                    dockItemTemplate.clicked();
+                }
+            }
+        }
     }
 
+    // === СТЕКЛЯННЫЙ ФОН ДОКА (Безопасный, без DropShadow) ===
     Rectangle {
+        id: dockBg
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 6
+        anchors.bottomMargin: 8
+        
+        // Динамическая ширина с плавным изменением
         width: Math.max(pillRow.implicitWidth + 24, 120)
-        height: 46
-        radius: 14
-        color: '#3fffffff'
-        border.color: "#26000000"
+        height: 56
+        radius: 18
+        
+        // macOS Glassmorphism (темная тема). Для светлой замените на #B3FFFFFF и border на #33000000
+        color: "#4D1C1C1E" 
+        border.color: "#33FFFFFF"
         border.width: 1
 
-        RowLayout {
+        // Используем Row вместо RowLayout для стабильности размеров иконок
+        Row {
             id: pillRow
-            anchors.fill: parent
-            anchors.margins: 5
-            spacing: 4
+            anchors.centerIn: parent
+            spacing: 6
 
-            Item {
-                Layout.fillHeight: true
-                Layout.preferredWidth: 36
-
-                Behavior on scale {
-                    SpringAnimation {
-                        duration: 400
-                        spring: 3       // Жёсткость пружины
-                        damping: 0.4    // Затухание (меньше = больше bounce)
-                    }
-                }
-        
-                Behavior on y {
-                    SpringAnimation {
-                        duration: 400
-                        spring: 2
-                        damping: 0.5
-                    }
-                }
-
-                Rectangle {
-                    anchors.fill: parent
-                    radius: 8
-                    color: launcherArea.containsMouse ? "#26000000" : "transparent"
-                }
-                Text {
-                    anchors.centerIn: parent
-                    font.family: root.iconFont
-                    font.pixelSize: 22
-                    color: "#1A1A1ACC"
-                    text: ""
-                }
-                MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onEntered: {
-                        icon.scale = 1.4
-                        icon.y = -15
-                    }
-                    onExited: {
-                        icon.scale = 1.0
-                        icon.y = 0
-                    }
-                }
+            // 1. Кнопка Лаунчера
+            DockItem {
+                appName: "Лаунчер"
+                appIcon: root.iconFor("", "image-missing")
+                onClicked: ShellState.launcherOpen = !ShellState.launcherOpen
             }
 
+            // Разделитель
             Rectangle {
-                Layout.preferredHeight: 26
-                Layout.preferredWidth: 1
-                color: "#33000000"
+                width: 1
+                height: 32
+                color: "#33FFFFFF"
+                anchors.verticalCenter: parent.verticalCenter
             }
 
-            // --- Закреплённые лаунчеры ---
+            // 2. Закрепленные приложения
             Repeater {
                 model: root.pinnedApps
-
-                delegate: Item {
-                    id: pinIcon
-
-                    required property var modelData
-
-                    Layout.fillHeight: true
-                    Layout.preferredWidth: 42
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: 8
-                        color: pinArea.containsMouse ? "#1F000000" : "transparent"
-                    }
-
-        
-
-                    IconImage {
-                        anchors.centerIn: parent
-                        width: 34
-                        height: 34
-                        source: root.iconFor(pinIcon.modelData.appId,
-                                             pinIcon.modelData.fallback)
-                        asynchronous: true
-                    }
-                    Rectangle {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.bottom: parent.bottom
-                        width: 4
-                        height: 4
-                        radius: 2
-                        color: "#E6000000"
-                        visible: root.isRunning(pinIcon.modelData.appId)
-                    }
-                    ToolTip.visible: pinArea.containsMouse
-                    ToolTip.delay: 400
-                    ToolTip.text: pinIcon.modelData.name
-                    MouseArea {
-                        id: pinArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.launch(pinIcon.modelData.cmd)
-                    }
+                delegate: DockItem {
+                    appName: modelData.name
+                    appIcon: root.iconFor(modelData.appId, modelData.fallback)
+                    isRunning: root.isRunning(modelData.appId)
+                    isActive: root.isActive(modelData.appId)
+                    onClicked: root.launch(modelData.cmd)
                 }
             }
 
+            // Разделитель (показывается только если есть открытые окна)
             Rectangle {
-                Layout.preferredHeight: 26
-                Layout.preferredWidth: 1
-                color: root.pinnedApps.length > 0 ? "#33000000" : "transparent"
+                width: 1
+                height: 32
+                color: "#33FFFFFF"
+                anchors.verticalCenter: parent.verticalCenter
+                visible: ToplevelManager.toplevels.values.length > 0
             }
 
+            // 3. Открытые окна
             Repeater {
                 model: ToplevelManager.toplevels
-
-                delegate: Item {
-                    id: appIcon
-
-                    required property var modelData
-
-                    property bool focused: modelData === ToplevelManager.activeToplevel
-                    // Окно закреплённого приложения — его иконка уже в доке.
-                    property bool pinnedDup: {
-                        const pins = root.pinnedApps;
-                        for (let i = 0; i < pins.length; i++) {
-                            if (pins[i].appId === modelData.appId)
-                                return true;
-                        }
-                        return false;
-                    }
-
-                    visible: !pinnedDup
-                    Layout.fillHeight: true
-                    Layout.preferredWidth: visible ? 42 : 0
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: 8
-                        color: appArea.containsMouse ? "#1F000000" : "transparent"
-                    }
-                    IconImage {
-                        anchors.centerIn: parent
-                        width: 34
-                        height: 34
-                        source: root.iconFor(appIcon.modelData.appId, appIcon.modelData.appId)
-                        asynchronous: true
-                    }
-                    // Индикатор активного окна.
-                    Rectangle {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.bottom: parent.bottom
-                        width: 4
-                        height: 4
-                        radius: 2
-                        color: "#E6000000"
-                        visible: appIcon.focused
-                    }
-                    ToolTip.visible: appArea.containsMouse
-                                     && appIcon.modelData.title !== ""
-                    ToolTip.delay: 400
-                    ToolTip.text: appIcon.modelData.title || ""
-
-                    MouseArea {
-                        id: appArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-                        onClicked: (mouse) => {
-                            if (mouse.button === Qt.MiddleButton) {
-                                appIcon.modelData.close();
-                                return;
-                            }
-                            if (appIcon.modelData.minimized
-                                || !appIcon.modelData.activated)
-                                appIcon.modelData.activate();
-                            else
-                                appIcon.modelData.activate(); // повторный клик — просто фокус
+                delegate: DockItem {
+                    appName: modelData.title || modelData.appId || "Окно"
+                    appIcon: root.iconFor(modelData.appId, modelData.appId)
+                    isRunning: true
+                    isActive: modelData === ToplevelManager.activeToplevel
+                    onClicked: {
+                        if (modelData.minimized || !modelData.activated) {
+                            modelData.activate();
+                        } else {
+                            modelData.activate();
                         }
                     }
+                    onMiddleClicked: modelData.close()
                 }
             }
         }

@@ -10,5 +10,6 @@ import Quickshell
 ShellRoot {
     TopBar {}
     Dock {}
+    LauncherBackdrop {} // до Launcher: подложка для закрытия по клику мимо
     Launcher {}
 }
