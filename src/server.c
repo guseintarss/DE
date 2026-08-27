@@ -6,7 +6,9 @@
 #include <wayland-server.h>
 #include <wlr/backend.h>
 #include <wlr/backend/headless.h>
+#include <wlr/backend/libinput.h>
 #include <wlr/backend/multi.h>
+#include <libinput.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
@@ -21,6 +23,7 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
+#include <wlr/types/wlr_gamma_control_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
@@ -176,6 +179,66 @@ static void update_seat_caps(struct mywm_server *server) {
     wlr_seat_set_capabilities(server->seat, caps);
 }
 
+/* Night light: клиент (wlsunset) прислал новую гамму для выхода.
+ * Собираем output state с LUT из control и коммитим. control == NULL —
+ * сброс гаммы (коммит без LUT возвращает дефолтную). */
+static void gamma_set_gamma_handler(struct wl_listener *listener,
+                                    void *data) {
+    struct mywm_server *server =
+        wl_container_of(listener, server, gamma_set_gamma);
+    (void)server;
+    struct wlr_gamma_control_manager_v1_set_gamma_event *event = data;
+    if (event == NULL || event->output == NULL) {
+        return;
+    }
+    struct wlr_output_state state;
+    wlr_output_state_init(&state);
+    if (event->control != NULL &&
+            !wlr_gamma_control_v1_apply(event->control, &state)) {
+        wlr_output_state_finish(&state);
+        return;
+    }
+    if (!wlr_output_commit_state(event->output, &state)) {
+        wlr_log(WLR_ERROR, "gamma: failed to commit output state");
+    }
+    wlr_output_state_finish(&state);
+}
+
+/* Применить [input] к libinput-устройству (тачпад: тап, natural scroll,
+ * DWT, ускорение). Устройства без поддержки (не тачпад) пропускаются
+ * проверками has_*_count/is_available. */
+static void input_apply_config(struct mywm_server *server,
+                               struct wlr_input_device *device) {
+    /* Только устройства libinput-бэкенда (реальное железо). Указатели
+     * wayland/x11/headless-бэкендов не настраиваются через libinput —
+     * wlr_libinput_get_device_handle на них ассертится. */
+    if (!wlr_input_device_is_libinput(device)) {
+        return;
+    }
+    struct libinput_device *li = wlr_libinput_get_device_handle(device);
+    if (li == NULL) {
+        return;
+    }
+    const struct input_config *cfg = &server->input_cfg;
+    if (libinput_device_config_tap_get_finger_count(li) > 0) {
+        libinput_device_config_tap_set_enabled(
+            li, cfg->tap_to_click ? LIBINPUT_CONFIG_TAP_ENABLED
+                                  : LIBINPUT_CONFIG_TAP_DISABLED);
+    }
+    if (libinput_device_config_scroll_has_natural_scroll(li)) {
+        libinput_device_config_scroll_set_natural_scroll_enabled(
+            li, cfg->natural_scroll ? 1 : 0);
+    }
+    if (libinput_device_config_dwt_is_available(li)) {
+        libinput_device_config_dwt_set_enabled(
+            li, cfg->disable_while_typing ? LIBINPUT_CONFIG_DWT_ENABLED
+                                          : LIBINPUT_CONFIG_DWT_DISABLED);
+    }
+    if (libinput_device_config_accel_is_available(li)) {
+        libinput_device_config_accel_set_speed(li, cfg->accel_speed);
+    }
+}
+
 static void server_new_input(struct wl_listener *listener, void *data) {
     struct mywm_server *server = wl_container_of(listener, server, new_input);
     struct wlr_input_device *device = data;
@@ -185,6 +248,7 @@ static void server_new_input(struct wl_listener *listener, void *data) {
         break;
     case WLR_INPUT_DEVICE_POINTER:
         server_new_pointer(server, device);
+        input_apply_config(server, device);
         break;
     default:
         break;
@@ -264,6 +328,7 @@ void server_init(struct mywm_server *server) {
     config_load_defaults(server);
     config_anim_defaults(server);
     config_shell_defaults(server);
+    config_input_defaults(server);
     config_load_auto(server);
 
     server->wallpaper = wallpaper_load_auto(server);
@@ -291,6 +356,12 @@ void server_init(struct mywm_server *server) {
     xdg_shell_init(server);
     /* Скриншоты для отладки: grim-совместимые клиенты (wlr-screencopy). */
     wlr_screencopy_manager_v1_create(server->wl_display);
+    /* Night light: клиенты wlsunset/gammastep задают LUT через
+     * wlr-gamma-control; применяем её к выходу на событии set_gamma. */
+    struct wlr_gamma_control_manager_v1 *gamma_mgr =
+        wlr_gamma_control_manager_v1_create(server->wl_display);
+    server->gamma_set_gamma.notify = gamma_set_gamma_handler;
+    wl_signal_add(&gamma_mgr->events.set_gamma, &server->gamma_set_gamma);
     /* Имена/геометрия выходов для клиентов waybar и др. (zxdg_output). */
     wlr_xdg_output_manager_v1_create(server->wl_display,
                                      server->output_layout);

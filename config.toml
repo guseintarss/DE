@@ -85,6 +85,11 @@ dock_icon = 48
 dock_padding = 8
 dock_gap = 6
 
+# Скругление углов окон (px), 0 — прямые углы. Максимизированные окна
+# тоже скруглены; поставь 0, если хочешь классическое «в край экрана».
+corner_radius = 12
+corner_radius_maximized = 12
+
 # Окна в стиле GNOME Adwaita (dark): тёмный хедер, волосяная тёмная рамка
 color_window_border   = "#101012FF"
 color_window_body     = "#1E1E20FF"

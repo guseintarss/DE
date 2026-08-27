@@ -96,6 +96,18 @@ struct animations_config {
 };
 
 /*
+ * Ввод ([input] в config.toml): настройка тачпадов через libinput.
+ * macOS-дефолты: tap-to-click и natural scroll включены.
+ */
+struct input_config {
+    bool tap_to_click;
+    bool natural_scroll;
+    bool disable_while_typing;
+    /* Ускорение указателя, -1..1 (0 — как в системе). */
+    double accel_speed;
+};
+
+/*
  * Дизайн оболочки ([design] в config.toml). Единственный источник
  * цветов/метрик для менюбара, дока и декораций окон. Меняется на лету:
  * kill -HUP <pid композитора> перечитывает секцию и применяет её.
@@ -136,6 +148,11 @@ struct design_config {
     float dock_minimized[4];
     float dock_sep[4];
     float dock_dot[4];
+
+    /* Скругление углов окна (px): обычного и максимизированного.
+     * 0 — прямые углы. */
+    double corner_radius;
+    double corner_radius_maximized;
 };
 
 struct mywm_server;
@@ -145,6 +162,8 @@ void config_load_defaults(struct mywm_server *server);
 void config_anim_defaults(struct mywm_server *server);
 /* Дефолты [shell] (вызывается до config_load_auto). */
 void config_shell_defaults(struct mywm_server *server);
+/* Дефолты [input] (вызывается до config_load_auto). */
+void config_input_defaults(struct mywm_server *server);
 /* Дефолты [design] (вызывается до config_load_auto, до создания UI). */
 void config_design_defaults(struct mywm_server *server);
 /* Перечитать только [design] из авто-пути (по SIGHUP) и применить к живым

@@ -28,6 +28,7 @@ deps = [
   dependency('wayland-protocols'),
   dependency('wlroots-0.20', version: '>=0.16.0'),
   dependency('xkbcommon'),
+  dependency('libinput'),
   dependency('pixman-1'),
   dependency('libdrm'),
   dependency('cairo'),

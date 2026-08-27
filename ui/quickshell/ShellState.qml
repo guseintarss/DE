@@ -8,12 +8,33 @@ Singleton {
     property bool launcherOpen: false
 
     function toggleLauncher() {
-        console.log("TEMP toggle ->", !root.launcherOpen); // TEMP
         root.launcherOpen = !root.launcherOpen;
     }
 
     function closeLauncher() {
-        console.log("TEMP closeLauncher called @", Date.now()); // TEMP
         root.launcherOpen = false;
+    }
+
+    // === Попапы верхней панели ===
+    // "" — закрыто, "menu" — выпадающее меню (barMenuName), "cc" —
+    // центр управления (громкость/яркость/батарея/календарь).
+    property string barPopup: ""
+    property string barMenuName: ""
+
+    function toggleBarMenu(name) {
+        if (root.barPopup === "menu" && root.barMenuName === name) {
+            root.barPopup = "";
+        } else {
+            root.barPopup = "menu";
+            root.barMenuName = name;
+        }
+    }
+
+    function toggleCC() {
+        root.barPopup = root.barPopup === "cc" ? "" : "cc";
+    }
+
+    function closeBarPopup() {
+        root.barPopup = "";
     }
 }

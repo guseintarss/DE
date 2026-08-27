@@ -11,7 +11,12 @@
  */
 #include "server.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/util/log.h>
 
@@ -19,6 +24,100 @@
 #define WS_ANIM_MS 240
 /* Период тика анимации, мс. */
 #define WS_TICK_MS 16
+
+/* --- Файловый IPC для оболочки (QuickShell TopBar) --- */
+/* Состояние: $XDG_RUNTIME_DIR/de/workspaces — строка "current count"
+ * (1-based). Команды: $XDG_RUNTIME_DIR/de/ws-cmd (FIFO) — "next",
+ * "prev" или номер стола. Простой и надежный канал без новых
+ * wayland-протоколов; qs читает файл через FileView. */
+
+static void ws_ipc_publish(struct mywm_server *server) {
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    if (runtime == NULL || runtime[0] == '\0') {
+        return;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/de", runtime);
+    mkdir(path, 0700);
+    snprintf(path, sizeof(path), "%s/de/workspaces", runtime);
+    FILE *f = fopen(path, "w");
+    if (f == NULL) {
+        return;
+    }
+    fprintf(f, "%d %d\n", workspace_current_index(server) + 1,
+            workspace_count(server));
+    fclose(f);
+}
+
+/* Обработчик команд из FIFO (неблокирующее чтение).
+ * Формат строк: "next" | "prev" | "N" (стол с 1) | "move N" (окно на
+ * стол N) | "spawn <команда>". Пачки строк разбираются полностью. */
+static int ws_cmd_read(int fd, uint32_t mask, void *data) {
+    struct mywm_server *server = data;
+    (void)mask;
+    char buf[512];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        if (n <= 0) {
+            break; /* EAGAIN или EOF(O_RDWR не даёт EOF) */
+        }
+        buf[n] = '\0';
+        char *save = NULL;
+        for (char *line = strtok_r(buf, "\n", &save); line != NULL;
+                line = strtok_r(NULL, "\n", &save)) {
+            if (strcmp(line, "next") == 0) {
+                workspace_switch_next(server);
+                continue;
+            }
+            if (strcmp(line, "prev") == 0) {
+                workspace_switch_prev(server);
+                continue;
+            }
+            if (strncmp(line, "move ", 5) == 0) {
+                char *end = NULL;
+                long idx = strtol(line + 5, &end, 10);
+                if (end != line + 5 && idx >= 1 && idx <= WS_MAX &&
+                        server->focused_view != NULL) {
+                    workspace_move_view(server->focused_view, (int)idx - 1);
+                }
+                continue;
+            }
+            if (strncmp(line, "spawn ", 6) == 0) {
+                mywm_spawn(server, line + 6);
+                continue;
+            }
+            char *end = NULL;
+            long idx = strtol(line, &end, 10);
+            if (end != line && idx >= 1 && idx <= WS_MAX) {
+                workspace_switch(server, (int)idx - 1);
+            }
+        }
+    }
+    return 0;
+}
+
+static void ws_ipc_init(struct mywm_server *server) {
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    if (runtime == NULL || runtime[0] == '\0') {
+        return;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/de", runtime);
+    mkdir(path, 0700);
+    snprintf(path, sizeof(path), "%s/de/ws-cmd", runtime);
+    if (mkfifo(path, 0666) != 0 && errno != EEXIST) {
+        wlr_log(WLR_ERROR, "workspaces: mkfifo failed: %s", strerror(errno));
+        return;
+    }
+    /* O_RDWR: писатель может не открывать наш конец; без EOF-спама. */
+    int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        wlr_log(WLR_ERROR, "workspaces: fifo open failed: %s", strerror(errno));
+        return;
+    }
+    struct wl_event_loop *loop = wl_display_get_event_loop(server->wl_display);
+    wl_event_loop_add_fd(loop, fd, WL_EVENT_READABLE, ws_cmd_read, server);
+}
 
 int workspace_current_index(const struct mywm_server *server) {
     return server->ws.current != NULL ? server->ws.current->index : 0;
@@ -168,6 +267,7 @@ void workspace_switch(struct mywm_server *server, int index) {
     if (ws->anim_timer != NULL) {
         wl_event_source_timer_update(ws->anim_timer, WS_TICK_MS);
     }
+    ws_ipc_publish(server);
 
     /* Фокус: первое видимое окно нового стола (fv уходит со старым). */
     struct mywm_view *it;
@@ -266,4 +366,8 @@ void workspaces_init(struct mywm_server *server) {
         wl_display_get_event_loop(server->wl_display);
     server->ws.anim_timer =
         wl_event_loop_add_timer(loop, ws_anim_tick, server);
+
+    /* IPC для оболочки: состояние + команды. */
+    ws_ipc_init(server);
+    ws_ipc_publish(server);
 }

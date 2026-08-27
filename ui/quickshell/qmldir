@@ -1,5 +1,7 @@
 singleton ShellState 1.0 ShellState.qml
 TopBar 1.0 TopBar.qml
+BarBackdrop 1.0 BarBackdrop.qml
+BarMenu 1.0 BarMenu.qml
+ControlCenter 1.0 ControlCenter.qml
 Dock 1.0 Dock.qml
-LauncherBackdrop 1.0 LauncherBackdrop.qml
 Launcher 1.0 Launcher.qml

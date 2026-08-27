@@ -565,8 +565,7 @@ static void server_cursor_axis(struct wl_listener *listener, void *data) {
         return;
     }
     idle_notify_activity(server);
-    /* Колесо при открытом меню приложений листает сетку. */
-    if (apps_menu_is_open(server)) {
+    /* Колесо при открытом меню приложений листает сетку. */    if (apps_menu_is_open(server)) {
         apps_menu_scroll(server, event->delta, event->source);
         wlr_seat_pointer_notify_frame(server->seat);
         return;
@@ -581,6 +580,63 @@ static void server_cursor_frame(struct wl_listener *listener, void *data) {
     struct mywm_server *server = wl_container_of(listener, server, cursor_frame);
     (void)data;
     wlr_seat_pointer_notify_frame(server->seat);
+}
+
+/*
+ * Трёхпальцевый горизонтальный свайп по тачпаду — переключение рабочих
+ * столов (macOS-стиль). Свайп влево — предыдущий стол (контент следует
+ * за пальцами), вправо — следующий. Порог 120px, одно переключение на
+ * жест; продолжительный свайп листает дальше после сброса накопителя.
+ */
+#define WS_GESTURE_FINGERS 3
+#define WS_GESTURE_THRESHOLD 120.0
+
+static void server_cursor_swipe_begin(struct wl_listener *listener,
+                                      void *data) {
+    struct mywm_server *server =
+        wl_container_of(listener, server, cursor_swipe_begin);
+    struct wlr_pointer_swipe_begin_event *event = data;
+    if (event == NULL) {
+        return;
+    }
+    idle_notify_activity(server);
+    server->ws_gesture_active = event->fingers == WS_GESTURE_FINGERS;
+    server->ws_gesture_done = false;
+    server->ws_gesture_dx = 0.0;
+}
+
+static void server_cursor_swipe_update(struct wl_listener *listener,
+                                       void *data) {
+    struct mywm_server *server =
+        wl_container_of(listener, server, cursor_swipe_update);
+    struct wlr_pointer_swipe_update_event *event = data;
+    if (event == NULL || !server->ws_gesture_active) {
+        return;
+    }
+    idle_notify_activity(server);
+    server->ws_gesture_dx += event->dx;
+    if (server->ws_gesture_done &&
+            fabs(server->ws_gesture_dx) < WS_GESTURE_THRESHOLD) {
+        return;
+    }
+    if (server->ws_gesture_dx > WS_GESTURE_THRESHOLD) {
+        server->ws_gesture_done = true;
+        server->ws_gesture_dx = 0.0;
+        workspace_switch_next(server);
+    } else if (server->ws_gesture_dx < -WS_GESTURE_THRESHOLD) {
+        server->ws_gesture_done = true;
+        server->ws_gesture_dx = 0.0;
+        workspace_switch_prev(server);
+    }
+}
+
+static void server_cursor_swipe_end(struct wl_listener *listener,
+                                    void *data) {
+    struct mywm_server *server =
+        wl_container_of(listener, server, cursor_swipe_end);
+    struct wlr_pointer_swipe_end_event *event = data;
+    (void)event;
+    server->ws_gesture_active = false;
 }
 
 static void seat_request_cursor(struct wl_listener *listener, void *data) {
@@ -622,6 +678,12 @@ void cursor_init(struct mywm_server *server) {
     wl_signal_add(&server->cursor->events.axis, &server->cursor_axis);
     server->cursor_frame.notify = server_cursor_frame;
     wl_signal_add(&server->cursor->events.frame, &server->cursor_frame);
+    server->cursor_swipe_begin.notify = server_cursor_swipe_begin;
+    wl_signal_add(&server->cursor->events.swipe_begin, &server->cursor_swipe_begin);
+    server->cursor_swipe_update.notify = server_cursor_swipe_update;
+    wl_signal_add(&server->cursor->events.swipe_update, &server->cursor_swipe_update);
+    server->cursor_swipe_end.notify = server_cursor_swipe_end;
+    wl_signal_add(&server->cursor->events.swipe_end, &server->cursor_swipe_end);
 
     server->request_cursor.notify = seat_request_cursor;
     wl_signal_add(&server->seat->events.request_set_cursor, &server->request_cursor);

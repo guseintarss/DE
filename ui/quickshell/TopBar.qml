@@ -24,12 +24,17 @@ PanelWindow {
     readonly property string uiFont: "SF Pro Display, Segoe UI, Cantarell, sans-serif"
     readonly property string iconFont: "MesloLGLDZ Nerd Font, Material Design Icons, sans-serif"
 
+    // === РАБОЧИЕ СТОЛЫ (Spaces): состояние из композитора ===
+    // Файл $XDG_RUNTIME_DIR/de/workspaces: "current count" (1-based).
+    property int wsCurrent: 1
+    property int wsCount: 1
+
     // === СТЕКЛЯННЫЙ ФОН МЕНЮБАРА ===
     Rectangle {
         anchors.fill: parent
         // Темное стекло (для светлой темы замените на "#B3FFFFFF" и border на "#33000000")
-        color: "#991C1C1E" 
-        border.color: "#33FFFFFF"
+        color: '#0bd6d6d8' 
+        border.color: '#00e9e9e9'
         border.width: 1
         
         // Основной макет
@@ -65,7 +70,11 @@ PanelWindow {
                 Repeater {
                     model: ["File", "Edit", "View", "Help"]
                     delegate: MenuButton {
+                        Component.onCompleted: console.log("TEMP btn:", modelData, "label:", label, "w:", width) // TEMP
                         label: modelData
+                        active: ShellState.barPopup === "menu" &&
+                                ShellState.barMenuName === modelData
+                        onClicked: ShellState.toggleBarMenu(modelData)
                     }
                 }
                 
@@ -105,54 +114,119 @@ PanelWindow {
                 Layout.alignment: Qt.AlignVCenter
                 spacing: 16
 
-                // --- Громкость ---
-                RowLayout {
-                    spacing: 6
-                    visible: volumeProc.label !== "" || volumeProc.muted
-                    
-                    Text {
-                        font.family: root.iconFont
-                        font.pixelSize: 14
-                        color: "#FFFFFF"
-                        // Иконка динамика: перечеркнутый если muted, обычный если нет
-                        text: volumeProc.muted ? "" : "" 
+                // --- Рабочие столы (Spaces) ---
+                // Точки-индикаторы: клик переключает стол через FIFO.
+                Row {
+                    spacing: 7
+                    Layout.alignment: Qt.AlignVCenter
+                    Repeater {
+                        model: root.wsCount
+                        delegate: Item {
+                            required property int index
+                            property int wsNum: index + 1
+                            width: 18
+                            height: 20
+
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: root.wsCurrent === parent.wsNum ? 16 : 7
+                                height: 7
+                                radius: 3.5
+                                color: root.wsCurrent === parent.wsNum
+                                       ? "#FFFFFF" : "#55FFFFFF"
+                                Behavior on width {
+                                    NumberAnimation { duration: 180; easing.type: Easing.OutQuint }
+                                }
+                                Behavior on color {
+                                    ColorAnimation { duration: 180 }
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.wsSwitch(parent.wsNum)
+                            }
+                        }
                     }
-                    Text {
-                        font.family: root.uiFont
-                        font.pixelSize: 13
-                        font.weight: Font.Medium
-                        color: "#FFFFFF"
-                        text: volumeProc.label
+                }
+
+                // --- Громкость ---
+                Item {
+                    Layout.fillHeight: true
+                    implicitWidth: volInner.implicitWidth
+                    implicitHeight: volInner.implicitHeight
+                    visible: volumeProc.label !== "" || volumeProc.muted
+
+                    RowLayout {
+                        id: volInner
+                        anchors.fill: parent
+                        spacing: 6
+                        Text {
+                            font.family: root.iconFont
+                            font.pixelSize: 14
+                            color: "#FFFFFF"
+                            text: volumeProc.muted ? "" : ""
+                        }
+                        Text {
+                            font.family: root.uiFont
+                            font.pixelSize: 13
+                            font.weight: Font.Medium
+                            color: "#FFFFFF"
+                            text: volumeProc.label
+                        }
+                    }
+                    // Клик открывает центр управления
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: ShellState.toggleCC()
                     }
                 }
 
                 // --- Батарея ---
-                RowLayout {
-                    spacing: 6
+                Item {
+                    Layout.fillHeight: true
+                    implicitWidth: batInner.implicitWidth
+                    implicitHeight: batInner.implicitHeight
                     visible: UPower.displayDevice && UPower.displayDevice.percentage > 0
-                    
-                    Text {
-                        font.family: root.iconFont
-                        font.pixelSize: 14
-                        color: "#FFFFFF"
-                        // Динамическая иконка батареи в зависимости от заряда и состояния
-                        text: {
-                            const d = UPower.displayDevice;
-                            const pct = d.percentage;
-                            if (d.state === UPowerDeviceState.Charging) return ""; // Молния
-                            if (pct > 80) return "";
-                            if (pct > 60) return "";
-                            if (pct > 40) return "";
-                            if (pct > 20) return "";
-                            return "";
+
+                    RowLayout {
+                        id: batInner
+                        anchors.fill: parent
+                        spacing: 6
+                        Text {
+                            font.family: root.iconFont
+                            font.pixelSize: 14
+                            color: "#FFFFFF"
+                            // Динамическая иконка батареи: зарядка/уровни
+                            text: {
+                                const d = UPower.displayDevice;
+                                if (d === null) return "";
+                                const pct = d.percentage;
+                                if (d.state === UPowerDeviceState.Charging) return "";
+                                if (pct > 80) return "";
+                                if (pct > 60) return "";
+                                if (pct > 40) return "";
+                                if (pct > 20) return "";
+                                return "";
+                            }
+                        }
+                        Text {
+                            font.family: root.uiFont
+                            font.pixelSize: 13
+                            font.weight: Font.Medium
+                            color: "#FFFFFF"
+                            text: UPower.displayDevice
+                                  ? Math.round(UPower.displayDevice.percentage) + "%" : ""
                         }
                     }
-                    Text {
-                        font.family: root.uiFont
-                        font.pixelSize: 13
-                        font.weight: Font.Medium
-                        color: "#FFFFFF"
-                        text: Math.round(UPower.displayDevice.percentage) + "%"
+                    // Клик открывает центр управления
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: ShellState.toggleCC()
                     }
                 }
 
@@ -193,7 +267,15 @@ PanelWindow {
                     font.weight: Font.Medium
                     color: "#FFFFFF"
                     text: Qt.formatDateTime(clock.date, "ddd, d MMM  HH:mm")
-                    
+
+                    // Клик по часам — центр управления (календарь)
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -6
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: ShellState.toggleCC()
+                    }
+
                     SystemClock {
                         id: clock
                         precision: SystemClock.Minutes
@@ -212,6 +294,8 @@ PanelWindow {
         id: btn
         property string glyph: ""
         property string label: ""
+        // Меню открыто (кнопка «залипает» подсветкой)
+        property bool active: false
         signal clicked()
 
         Layout.fillHeight: true
@@ -222,7 +306,7 @@ PanelWindow {
             anchors.fill: parent
             anchors.margins: 4
             radius: 6
-            color: btnArea.containsMouse ? "#33FFFFFF" : "transparent"
+            color: btnArea.containsMouse || btn.active ? '#1bf4f3f3' : "transparent"
             Behavior on color { ColorAnimation { duration: 150; easing.type: Easing.OutQuad } }
         }
 
@@ -290,5 +374,38 @@ PanelWindow {
         running: true
         triggeredOnStart: true
         onTriggered: volumeProc.running = true
+    }
+
+    // ==========================================
+    // РАБОЧИЕ СТОЛЫ: IPC с композитором
+    // ==========================================
+    FileView {
+        id: wsStateFile
+        path: Quickshell.env("XDG_RUNTIME_DIR") + "/de/workspaces"
+        watchChanges: true
+        onFileChanged: wsStateFile.reload()
+        onLoaded: {
+            const parts = wsStateFile.text().trim().split(" ");
+            if (parts.length === 2) {
+                const cur = parseInt(parts[0]);
+                const cnt = parseInt(parts[1]);
+                if (!isNaN(cur)) root.wsCurrent = cur;
+                if (!isNaN(cnt) && cnt >= 1) root.wsCount = cnt;
+            }
+        }
+    }
+
+    Process {
+        id: wsCmdProc
+        // Запись в FIFO композитора; читатель (DE) открыт всегда —
+        // запись не блокируется.
+        command: ["sh", "-c",
+                  "printf '%s\\n' 1 > \"$XDG_RUNTIME_DIR/de/ws-cmd\""]
+    }
+
+    function wsSwitch(n) {
+        wsCmdProc.command = ["sh", "-c",
+            "printf '%s\\n' " + n + " > \"$XDG_RUNTIME_DIR/de/ws-cmd\""];
+        wsCmdProc.running = true;
     }
 }

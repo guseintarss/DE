@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import Qt5Compat.GraphicalEffects
+
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Widgets
@@ -9,43 +10,29 @@ import Quickshell.Widgets
 PanelWindow {
     id: root
 
-    // Позиционирование как у Spotlight (по центру сверху):
-    // при единственном якоре top композитор сам центрирует окно по горизонтали
     anchors {
+        left: true
+        right: true
         top: true
-    }
-    margins {
-        top: 120 // Отступ от верхнего края экрана
+        bottom: true
     }
     
-    implicitWidth: 600  // Сделаем пошире, как в macOS
-    implicitHeight: 480
-    // Окно не размапливаем сразу при закрытии: держим его, пока играет
-    // обратная анимация, иначе поверхность исчезнет в тот же кадр.
-    // ВАЖНО: управляем внутренним флагом shown, а не читаем visible —
-    // биндинг visible пересчитывается раньше обработчика сигнала, и
-    // окно успевает скрыться до запуска анимации закрытия.
     visible: root.shown || root.closing
     color: "transparent"
     focusable: true
 
-    // Оверлей поверх баров: не резервируем эксклюзивную зону, иначе
-    // при открытии лаунчер выталкивает TopBar вниз и схлопывает док.
     WlrLayershell.layer: WlrLayer.Overlay
     exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.keyboardFocus: root.closing ? WlrKeyboardFocus.None : WlrKeyboardFocus.Exclusive
 
-    // Во время закрытия фокус отдаём сразу, не дожидаясь конца анимации.
-    WlrLayershell.keyboardFocus: root.closing
-        ? WlrKeyboardFocus.None : WlrKeyboardFocus.Exclusive
-
-    // === АНИМАЦИЯ ПОЯВЛЕНИЯ/ИСЧЕЗНОВЕНИЯ В СТИЛЕ MACOS ===
-    // Анимируем внутренний контейнер, а не само окно, чтобы избежать
-    // артефактов Wayland. Цели привязаны к shown: при закрытии Behavior
-    // сам проиграет значения в обратную сторону, окно скроет таймер.
+    // === АНИМАЦИЯ ПОЯВЛЕНИЯ/ИСЧЕЗНОВЕНИЯ ===
     property bool closing: false
     property bool shown: false
     property real targetScale: root.shown ? 1.0 : 0.92
     property real targetOpacity: root.shown ? 1.0 : 0.0
+
+    // Храним ссылку на приложение, для которого открыто меню
+    property var currentContextMenuEntry: null
 
     Timer {
         id: focusTimer
@@ -53,40 +40,38 @@ PanelWindow {
         onTriggered: search.forceActiveFocus()
     }
 
-    // Длительность закрытия: чуть длиннее самой долгой анимации (250мс)
     Timer {
         id: closeTimer
         interval: 270
         onTriggered: root.closing = false
     }
 
-    // Следим за переключателем: при открытии поднимаем shown и возвращаем
-    // фокус, при закрытии запускаем обратную анимацию и только потом
-    // прячем окно.
+    property bool cascadeActive: false
+    Timer {
+        id: cascadeTimer
+        interval: 700
+        onTriggered: root.cascadeActive = false
+    }
+
     Connections {
         target: ShellState
         function onLauncherOpenChanged() {
             const open = ShellState.launcherOpen;
             if (open) {
-                // Порядок важен: сначала поднимаем shown, потом снимаем
-                // closing — иначе биндинг visible увидит false в промежутке
-                // и поверхность мигнёт unmap/map.
                 root.shown = true;
                 root.closing = false;
                 closeTimer.stop();
-                // Очистка поиска запускает фильтрацию через onTextChanged;
-                // явный refresh нужен только если текст уже пуст (события
-                // не будет). Qt.callLater схлопывает повторы в один кадр.
+                
                 if (search.text !== "") {
                     search.text = "";
                 } else {
                     Qt.callLater(root.refresh);
                 }
-                // Небольшая задержка для плавности фокуса после анимации
+                
+                root.cascadeActive = true;
+                cascadeTimer.restart();
                 focusTimer.restart();
             } else {
-                // Зеркально: сначала ставим флаг «держать окно замапленным»,
-                // и лишь затем опускаем shown, запуская обратную анимацию.
                 root.closing = true;
                 closeTimer.restart();
                 root.shown = false;
@@ -94,39 +79,110 @@ PanelWindow {
         }
     }
 
-    // Главный контейнер с анимацией
-    Item {
-        id: contentContainer
-        anchors.fill: parent
-        
-        // Магия анимации: Behavior автоматически интерполирует значения
-        Behavior on scale {
-            NumberAnimation { 
-                duration: 250 
-                easing.type: Easing.OutQuint // Фирменная плавная кривая Apple
+    // === КОНТЕКСТНОЕ МЕНЮ ===
+    Menu {
+        id: contextMenu
+        // Стилизация меню под glassmorphism
+        background: Rectangle {
+            implicitWidth: 200
+            radius: 12
+            color: "#E61C1C1E" // Чуть менее прозрачный для читаемости
+            border.color: "#33FFFFFF"
+            border.width: 1
+            layer.enabled: true
+            layer.effect: DropShadow {
+                transparentBorder: true
+                horizontalOffset: 0
+                verticalOffset: 8
+                radius: 16
+                samples: 20
+                color: "#88000000"
             }
         }
-        Behavior on opacity {
-            NumberAnimation { 
-                duration: 200 
-                easing.type: Easing.OutQuint 
+
+        MenuItem {
+            text: "📌 Добавить на рабочий стол"
+            font.family: "SF Pro Display, Segoe UI, sans-serif"
+            font.pixelSize: 14
+            // Стилизация элемента меню
+            background: Rectangle {
+                color: parent.highlighted ? "#33FFFFFF" : "transparent"
+                radius: 8
+                anchors.fill: parent
+                anchors.margins: 4
             }
+            contentItem: Text {
+                text: parent.text
+                font: parent.font
+                color: "#FFFFFF"
+                leftPadding: 12
+                rightPadding: 12
+                verticalAlignment: Text.AlignVCenter
+            }
+            onTriggered: {
+                if (root.currentContextMenuEntry) {
+                    root.addToDesktop(root.currentContextMenuEntry);
+                }
+            }
+        }
+
+        MenuSeparator {
+            contentItem: Rectangle {
+                implicitWidth: 180
+                implicitHeight: 1
+                color: "#33FFFFFF"
+            }
+        }
+
+        MenuItem {
+            text: "🚀 Добавить в док"
+            font.family: "SF Pro Display, Segoe UI, sans-serif"
+            font.pixelSize: 14
+            background: Rectangle {
+                color: parent.highlighted ? "#33FFFFFF" : "transparent"
+                radius: 8
+                anchors.fill: parent
+                anchors.margins: 4
+            }
+            contentItem: Text {
+                text: parent.text
+                font: parent.font
+                color: "#FFFFFF"
+                leftPadding: 12
+                rightPadding: 12
+                verticalAlignment: Text.AlignVCenter
+            }
+            onTriggered: {
+                if (root.currentContextMenuEntry) {
+                    root.addToDock(root.currentContextMenuEntry);
+                }
+            }
+        }
+    }
+
+    Item {
+        id: contentContainer
+        width: 600
+        height: 480
+        anchors.centerIn: parent
+        
+        Behavior on scale {
+            NumberAnimation { duration: 250; easing.type: Easing.OutQuint }
+        }
+        Behavior on opacity {
+            NumberAnimation { duration: 200; easing.type: Easing.OutQuint }
         }
 
         scale: targetScale
         opacity: targetOpacity
 
-        // === СТЕКЛЯННАЯ ПАНЕЛЬ (Glassmorphism) ===
         Rectangle {
             anchors.fill: parent
-            radius: 18 // Большие скругления как в macOS
-            // Глубокий темный фон с прозрачностью (для светлой темы можно заменить на #CCFFFFFF)
+            radius: 18
             color: "#CC1C1C1E" 
-            // Тонкая светлая граница создает эффект "объема" стекла
             border.color: "#33FFFFFF"
             border.width: 1
 
-            // Легкая тень (симуляция через градиент, если DropShadow недоступен)
             layer.enabled: true
             layer.effect: DropShadow {
                 transparentBorder: true
@@ -142,17 +198,15 @@ PanelWindow {
                 anchors.margins: 16
                 spacing: 12
 
-                // === ПОЛЕ ПОИСКА В СТИЛЕ SPOTLIGHT ===
+                // === ПОЛЕ ПОИСКА ===
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 12
 
-                    // Иконка лупы
                     IconImage {
-                        source: Quickshell.iconPath("system-search") // Или "edit-find"
+                        source: Quickshell.iconPath("system-search")
                         width: 20
                         height: 20
-                        // macOS-синий при фокусе имитируем яркостью: у IconImage нет свойства color
                         opacity: search.activeFocus ? 1.0 : 0.55
                         Behavior on opacity { NumberAnimation { duration: 150 } }
                     }
@@ -167,126 +221,169 @@ PanelWindow {
                         color: "#FFFFFF"
                         selectionColor: "#0A84FF"
                         selectedTextColor: "#FFFFFF"
-                        
-                        // Убираем стандартный фон Qt
                         background: Item {} 
-
-                        onTextChanged: Qt.callLater(root.refresh)
-                        
-                        // Стилизация плейсхолдера (через палитру)
                         palette.placeholderText: "#8E8E93"
                         palette.text: "#FFFFFF"
 
+                        onTextChanged: Qt.callLater(root.refresh)
+                        
+                        Keys.onDownPressed: {
+                            if (appGrid.count > 0) {
+                                appGrid.currentIndex = 0;
+                                appGrid.forceActiveFocus();
+                            }
+                        }
                         Keys.onEscapePressed: ShellState.closeLauncher()
-                        Keys.onReturnPressed: launch(0)
-                        Keys.onEnterPressed: launch(0)
-                        Keys.onDownPressed: appList.incrementCurrentIndex()
-                        Keys.onUpPressed: appList.decrementCurrentIndex()
+                        Keys.onReturnPressed: root.launch(0)
+                        Keys.onEnterPressed: root.launch(0)
                     }
                 }
 
-                // Разделительная линия (очень тонкая)
                 Rectangle {
                     Layout.fillWidth: true
                     height: 1
                     color: "#33FFFFFF"
                 }
 
-                // === СПИСОК ПРИЛОЖЕНИЙ ===
-                ListView {
-                    id: appList
+                // === СЕТКА ПРИЛОЖЕНИЙ (GRID) ===
+                GridView {
+                    id: appGrid
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
-                    spacing: 4
+                    
+                    cellWidth: 110
+                    cellHeight: 110
+                    flow: GridView.FlowLeftToRight
+                    
                     currentIndex: 0
                     keyNavigationEnabled: true
+                    keyNavigationWraps: false
                     boundsBehavior: Flickable.StopAtBounds
-
-                    // Плавная прокрутка
                     flickDeceleration: 1500
 
+                    Keys.onUpPressed: {
+                        if (appGrid.currentIndex < 4) {
+                            search.forceActiveFocus();
+                        } else {
+                            appGrid.decrementCurrentIndex();
+                        }
+                    }
+
                     delegate: Item {
-                        id: row
+                        id: gridItem
                         required property var modelData
                         required property int index
-                        width: appList.width
-                        height: 48
+                        width: appGrid.cellWidth
+                        height: appGrid.cellHeight
 
-                        // Фон элемента с анимацией
+                        property real appearP: root.cascadeActive ? 0 : 1
+                        opacity: appearP
+                        transform: Translate {
+                            y: (1 - gridItem.appearP) * 24
+                        }
+                        
+                        Component.onCompleted: {
+                            if (root.cascadeActive && index < 40) {
+                                cascadeAnim.restart();
+                            } else {
+                                gridItem.appearP = 1;
+                            }
+                        }
+                        
+                        SequentialAnimation {
+                            id: cascadeAnim
+                            PauseAnimation { duration: gridItem.index * 15 }
+                            NumberAnimation {
+                                target: gridItem
+                                property: "appearP"
+                                to: 1
+                                duration: 220
+                                easing.type: Easing.OutQuad
+                            }
+                        }
+
                         Rectangle {
                             id: rowBg
                             anchors.fill: parent
-                            anchors.margins: 4
-                            radius: 10
-                            // Цвет меняется при наведении или фокусе клавиатуры
-                            color: (row.ListView.isCurrentItem || rowArea.containsMouse) ? "#33FFFFFF" : "transparent"
+                            anchors.margins: 6
+                            radius: 12
+                            color: (gridItem.GridView.isCurrentItem || gridArea.containsMouse) ? "#33FFFFFF" : "transparent"
+                            Behavior on color { ColorAnimation { duration: 150; easing.type: Easing.OutQuad } }
+                        }
+
+                        IconImage {
+                            id: appIco
+                            width: 48
+                            height: 48
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.top: parent.top
+                            anchors.topMargin: 10
+                            asynchronous: true
+                            source: {
+                                let n = gridItem.modelData.icon || "";
+                                if (n === "") return "";
+                                try {
+                                    return Quickshell.iconPath(n, "image-missing");
+                                } catch (err) {
+                                    return n;
+                                }
+                            }
+                            scale: gridArea.containsMouse ? 1.1 : 1.0
+                            Behavior on scale { SpringAnimation { spring: 3; damping: 0.5; duration: 300 } }
+                        }
+
+                        Text {
+                            id: appName
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.top: appIco.bottom
+                            anchors.topMargin: 6
+                            anchors.bottom: parent.bottom
+                            anchors.bottomMargin: 8
+                            width: parent.width - 16
                             
-                            Behavior on color {
-                                ColorAnimation { duration: 150; easing.type: Easing.OutQuad }
-                            }
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignTop
+                            
+                            font.family: "SF Pro Display, Segoe UI, sans-serif"
+                            font.pixelSize: 12
+                            font.weight: Font.Medium
+                            color: "#FFFFFF"
+                            elide: Text.ElideRight
+                            maximumLineCount: 2
+                            wrapMode: Text.WordWrap
+                            text: gridItem.modelData.name || ""
+                            
+                            opacity: gridItem.GridView.isCurrentItem ? 1.0 : 0.85
+                            Behavior on opacity { NumberAnimation { duration: 150 } }
                         }
 
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
-                            spacing: 14
-
-                            // Иконка приложения с легкой анимацией масштаба при наведении
-                            IconImage {
-                                id: appIco
-                                Layout.preferredWidth: 32
-                                Layout.preferredHeight: 32
-                                asynchronous: true
-                                
-                                source: {
-                                    let n = row.modelData.icon || "";
-                                    if (n === "") return "";
-                                    try {
-                                        return Quickshell.iconPath(n, "image-missing");
-                                    } catch (err) {
-                                        return n;
-                                    }
-                                }
-                                
-                                // Пружинное увеличение иконки при наведении на строку
-                                scale: rowArea.containsMouse ? 1.1 : 1.0
-                                Behavior on scale { 
-                                    SpringAnimation { spring: 3; damping: 0.5; duration: 300 } 
-                                }
-                            }
-
-                            // Название приложения
-                            Text {
-                                Layout.fillWidth: true
-                                font.family: "SF Pro Display, Segoe UI, sans-serif"
-                                font.pixelSize: 15
-                                font.weight: Font.Medium
-                                color: "#FFFFFF"
-                                elide: Text.ElideRight
-                                text: row.modelData.name || ""
-                                
-                                // Если элемент выбран, делаем текст ярче
-                                opacity: row.ListView.isCurrentItem ? 1.0 : 0.85
-                                Behavior on opacity { NumberAnimation { duration: 150 } }
-                            }
-                        }
-
+                        // === ОБНОВЛЕННАЯ MOUSEAREA ===
                         MouseArea {
-                            id: rowArea
+                            id: gridArea
                             anchors.fill: parent
                             hoverEnabled: true
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton // Разрешаем правый клик
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                appList.currentIndex = index;
-                                root.launch(index);
+                            
+                            onClicked: (mouse) => {
+                                if (mouse.button === Qt.LeftButton) {
+                                    appGrid.currentIndex = index;
+                                    root.launch(index);
+                                } else if (mouse.button === Qt.RightButton) {
+                                    appGrid.currentIndex = index;
+                                    // Сохраняем текущий элемент и показываем меню
+                                    root.currentContextMenuEntry = gridItem.modelData;
+                                    
+                                    // Позиционируем меню рядом с курсором, но с учетом границ экрана
+                                    let globalPos = gridArea.mapToItem(null, mouse.x, mouse.y);
+                                    contextMenu.popup(root, globalPos.x, globalPos.y);
+                                }
                             }
-                            onEntered: appList.currentIndex = index
+                            onEntered: appGrid.currentIndex = index
                         }
                     }
                     
-                    // Индикатор прокрутки (скроллбар) в стиле macOS
                     ScrollBar.vertical: ScrollBar {
                         policy: ScrollBar.AsNeeded
                         contentItem: Rectangle {
@@ -301,11 +398,8 @@ PanelWindow {
         }
     }
 
-    // Кэш всех .desktop-записей. Биндинг (а не одноразовый захват!)
-    // обязателен: скан .desktop у quickshell асинхронный, при
-    // Component.onCompleted список ещё пуст. Биндинг подтянет записи,
-    // когда скан завершится.
-    property var cachedEntries: DesktopEntries.applications.values
+    property var cachedEntries: DesktopEntries.applications
+        ? DesktopEntries.applications.values : []
     onCachedEntriesChanged: Qt.callLater(root.refresh)
 
     function refresh() {
@@ -322,7 +416,6 @@ PanelWindow {
             out.push(entry);
         }
         
-        // Сортировка: сначала точное совпадение, потом по алфавиту
         out.sort((a, b) => {
             const nameA = (a.name || "").toLowerCase();
             const nameB = (b.name || "").toLowerCase();
@@ -331,13 +424,13 @@ PanelWindow {
             return nameA.localeCompare(nameB);
         });
         
-        appList.model = out;
+        appGrid.model = out;
     }
 
     function launch(i) {
-        if (i < 0 || i >= appList.count)
+        if (i < 0 || i >= appGrid.count)
             return;
-        const entry = appList.itemAtIndex(i)?.modelData;
+        const entry = appGrid.itemAtIndex(i)?.modelData;
         if (!entry)
             return;
         try {
@@ -348,7 +441,48 @@ PanelWindow {
         ShellState.closeLauncher();
     }
 
-    // Клик мимо панели — закрыть (с анимацией)
+    // === ФУНКЦИИ ДЛЯ КОНТЕКСТНОГО МЕНЮ ===
+    
+    function addToDesktop(entry) {
+        console.log("Добавление на рабочий стол:", entry.name);
+        
+        // ПРИМЕЧАНИЕ: QML не имеет прямого доступа к файловой системе для копирования.
+        // Вариант 1: Если Quickshell поддерживает выполнение команд, используйте его.
+        // Вариант 2: Вызвать внешний bash-скрипт через Qt.openUrlExternally (хак).
+        // Пример логики, которую нужно реализовать:
+        // 1. Получить путь к .desktop файлу: entry.filePath или entry.path
+        // 2. Скопировать его в ~/Desktop/
+        // 3. Сделать исполняемым: chmod +x ~/Desktop/filename.desktop
+        
+        /* Пример (требует адаптации под ваш бэкенд):
+        const desktopPath = entry.filePath; // или entry.path
+        const scriptUrl = `file:///home/${getUser()}/.local/bin/add-to-desktop.sh "${desktopPath}"`;
+        Qt.openUrlExternally(scriptUrl);
+        */
+       
+       console.warn("Функция addToDesktop требует реализации бэкенд-логики (копирование .desktop файла)");
+    }
+
+    function addToDock(entry) {
+        console.log("Добавление в док:", entry.name);
+        
+        // ПРИМЕЧАНИЕ: Реализация зависит от того, как написан ваш док.
+        // Вариант А: Если док читает JSON-файл конфигурации, добавьте путь entry.filePath в этот массив.
+        // Вариант Б: Если док на Quickshell, возможно, у вас есть глобальный объект Settings или JsonConfig, 
+        //             в который можно сделать push: DockConfig.pinnedApps.push(entry.filePath)
+        
+        /* Пример для Quickshell JsonConfig (если используется):
+        if (DockSettings && DockSettings.pinned) {
+            if (!DockSettings.pinned.includes(entry.filePath)) {
+                DockSettings.pinned.push(entry.filePath);
+                // Сохранить конфиг
+            }
+        }
+        */
+        
+        console.warn("Функция addToDock требует реализации логики обновления конфига вашего дока");
+    }
+
     MouseArea {
         anchors.fill: parent
         z: -1

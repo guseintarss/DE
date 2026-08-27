@@ -38,16 +38,15 @@ struct mywm_view;
 #define EFFECTS_OPEN_SCALE 0.92
 #define EFFECTS_CLOSE_SCALE 0.94
 
-/* Жёсткая пружина трансформаций (maximize/unmaximize/genie): визуально
- * завершается за ~0.3 с, как зелёная кнопка в macOS. */
-#define EFFECTS_TFORM_STIFFNESS 700.0
-#define EFFECTS_TFORM_DAMPING 53.0
+/* Длительности трансформаций (мс): сворачивание в док чуть длиннее
+ * максимизации, как в macOS. Прогресс — easing по времени, не пружина
+ * (перелёт геометрии выглядел как «желе»). */
+#define EFFECTS_TFORM_GENIE_MS 420.0
+#define EFFECTS_TFORM_MAX_MS 320.0
 
-/* Скругление углов окна (px) и genie-сворачивание в док (целевой
- * масштаб и непрозрачность). */
-#define EFFECTS_CORNER_RADIUS 12.0
+/* Genie-сворачивание в док (целевой
+ * масштаб; непрозрачность гасится в ноль к концу). */
 #define EFFECTS_GENIE_SCALE 0.15
-#define EFFECTS_GENIE_OPACITY 0.20
 
 struct spring_anim {
     bool active;

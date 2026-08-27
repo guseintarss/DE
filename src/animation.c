@@ -54,13 +54,6 @@ bool spring_settled(const struct spring_anim *s) {
         (fabs(s->target - s->current) < 0.0005 && fabs(s->velocity) < 0.005);
 }
 
-/* Пружина трансформации: амплитуда 1, пороги чуть шире (масштабные
- * сдвиги на доли пикселя невидимы). */
-static bool tform_spring_settled(const struct spring_anim *s) {
-    return !s->active ||
-        (fabs(s->target - s->current) < 0.002 && fabs(s->velocity) < 0.02);
-}
-
 /* Метрики кнопок заголовка (дубль static-хелперов из effects.c). */
 static int anim_btn_x(const struct mywm_view *view, int i) {
     const struct design_config *d = &view->server->design;
@@ -255,8 +248,25 @@ static bool animation_step_all(struct mywm_server *server) {
         spring_step(&view->spr_scale, dt);
         bool tform_settled = true;
         if (view->tform_active) {
-            spring_step(&view->tform_spr, dt);
-            tform_settled = tform_spring_settled(&view->tform_spr);
+            /* Временной прогресс с easing вместо пружины: сворачивание
+             * — плавный in-out (втягивание в док), максимизация/выход
+             * из дока — быстрый старт и мягкая посадка (out-quint). */
+            view->tform_elapsed += dt * 1000.0;
+            double raw = view->tform_duration > 0.0
+                ? fmin(1.0, view->tform_elapsed / view->tform_duration)
+                : 1.0;
+            double p;
+            if (view->tform_kind == TFORM_GENIE_IN) {
+                /* easeInOutCubic */
+                p = raw < 0.5 ? 4.0 * raw * raw * raw
+                              : 1.0 - pow(-2.0 * raw + 2.0, 3.0) / 2.0;
+            } else {
+                /* easeOutQuint */
+                double q = 1.0 - raw;
+                p = 1.0 - q * q * q * q * q;
+            }
+            view->tform_spr.current = p;
+            tform_settled = raw >= 1.0;
         }
         apply_view_transforms(view);
 

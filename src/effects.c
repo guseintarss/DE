@@ -293,8 +293,10 @@ void effects_chrome_regen(struct mywm_view *view) {
                 (d->border_hover[i] - d->window_border[i]) * t;
         }
     }
-    /* В maximized углы прямые: окно сливается с краями экрана. */
-    double radius = view->maximized ? 0.0 : EFFECTS_CORNER_RADIUS;
+    /* Радиус углов настраивается в [design]: у максимизированного —
+     * свой ключ (по умолчанию тоже скруглён, 0 — прямые углы). */
+    double radius = view->maximized ? d->corner_radius_maximized
+                                    : d->corner_radius;
     chrome_draw(nb, radius, border, title, d->window_body,
                 view->maximized ? 0 : d->border, d->title_h);
 
@@ -314,9 +316,13 @@ void effects_chrome_regen(struct mywm_view *view) {
 /*
  * Старт трансформации. Снимает open/close-пружины (slide/opacity/hover),
  * фиксирует стартовую геометрию (tform_a) и целевую (tform_b), запускает
- * пружину прогресса 0 -> 1. При отключённых анимациях — мгновенный snap
- * через effects_tform_finalize.
+ * временную интерполяцию 0 -> 1. При отключённых анимациях — мгновенный
+ * snap через effects_tform_finalize.
  */
+static double smoothstep(double e0, double e1, double x) {
+    double t = fmin(1.0, fmax(0.0, (x - e0) / (e1 - e0)));
+    return t * t * (3.0 - 2.0 * t);
+}
 void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind) {
     struct mywm_server *server = view->server;
     if (view->closing || view->tform_active || view->chrome_buf == NULL) {
@@ -392,7 +398,7 @@ void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind) {
             .ch = view->chrome_h * s,
             .w = view->width * s,
             .h = view->height * s,
-            .op = EFFECTS_GENIE_OPACITY,
+            .op = 0.0, /* к концу окно полностью растворяется */
         };
         view->tform_home = a;
         break;
@@ -413,11 +419,16 @@ void effects_tform_start(struct mywm_view *view, enum mywm_tform_kind kind) {
         view->tform_min_geo = b;
         wlr_scene_node_set_enabled(&view->deco_tree->node, true);
     }
-    spring_init(&view->tform_spr, EFFECTS_TFORM_STIFFNESS,
-                EFFECTS_TFORM_DAMPING);
+    /* Временной прогресс вместо пружины: никакого перелёта геометрии. */
     view->tform_spr.current = 0.0;
-    spring_set_target(&view->tform_spr, 1.0);
+    view->tform_spr.active = false;
+    view->tform_elapsed = 0.0;
+    view->tform_duration = kind == TFORM_GENIE_IN ||
+        kind == TFORM_GENIE_OUT ? EFFECTS_TFORM_GENIE_MS
+                                : EFFECTS_TFORM_MAX_MS;
     view->tform_active = true;
+    /* Окно летит НАД остальными (как в macOS), а не под соседями. */
+    wlr_scene_node_raise_to_top(&view->deco_tree->node);
 
     if (!server->animations_cfg.enabled) {
         effects_tform_finalize(view);
@@ -439,42 +450,62 @@ void effects_tform_apply(struct mywm_view *view) {
     struct tform_geo *b = &view->tform_b;
     double p = view->tform_spr.current;
 
-    double x = a->x + (b->x - a->x) * p;
-    double y = a->y + (b->y - a->y) * p;
-    /* Клампим: пружина при рывке dt может перекинуть цель — а wlroots
-     * ассертит opacity в [0,1] и dest_size >= 0 (SIGABRT иначе). */
     double cw = fmax(1.0, a->cw + (b->cw - a->cw) * p);
     double ch = fmax(1.0, a->ch + (b->ch - a->ch) * p);
     double w = fmax(1.0, a->w + (b->w - a->w) * p);
     double h = fmax(1.0, a->h + (b->h - a->h) * p);
-    double op = fmin(1.0, fmax(0.0, a->op + (b->op - a->op) * p));
 
+    bool genie = view->tform_kind == TFORM_GENIE_IN ||
+        view->tform_kind == TFORM_GENIE_OUT;
+    /* Масштаб кадра: при genie кнопки/инсет сжимаются вместе с окном,
+     * при максимизации сохраняют размер (как в macOS). */
+    double bs = genie && a->cw > 1 ? cw / a->cw : 1.0;
+    const struct design_config *d = &view->server->design;
+
+    double x, y, op;
+    if (genie) {
+        /* Сжатие к ЦЕНТРУ иконки дока: центр окна летит по прямой от
+         * центра окна к центру иконки, размер сжимается вокруг него. */
+        double cax = a->x + a->cw / 2.0;
+        double cay = a->y + a->ch / 2.0;
+        double cbx = b->x + b->cw / 2.0;
+        double cby = b->y + b->ch / 2.0;
+        double cx = cax + (cbx - cax) * p;
+        double cy = cay + (cby - cay) * p;
+        x = cx - cw / 2.0;
+        y = cy - ch / 2.0;
+        /* Альфа не зависит от геометрии: сворачивание гасит в конце,
+         * восстановление проявляет в начале (macOS-стиль). */
+        if (view->tform_kind == TFORM_GENIE_IN) {
+            op = 1.0 - smoothstep(0.55, 1.0, p);
+        } else {
+            op = smoothstep(0.0, 0.4, p);
+        }
+    } else {
+        x = a->x + (b->x - a->x) * p;
+        y = a->y + (b->y - a->y) * p;
+        op = 1.0;
+    }
+    op = fmin(1.0, fmax(0.0, op));
+
+    /* deco origin = текущий верхний левый угол кадра; все дети — от него
+     * (без «центровок вокруг исходного размера» — двойных сдвигов нет). */
     wlr_scene_node_set_position(&view->deco_tree->node, x, y);
     wlr_scene_buffer_set_dest_size(view->chrome,
                                    (int)(cw + 0.5), (int)(ch + 0.5));
-    wlr_scene_node_set_position(&view->chrome->node,
-                                (a->cw - cw) / 2.0, (a->ch - ch) / 2.0);
+    wlr_scene_node_set_position(&view->chrome->node, 0, 0);
     wlr_scene_buffer_set_opacity(view->chrome, (float)op);
 
     if (view->content_buffer != NULL) {
         wlr_scene_buffer_set_dest_size(view->content_buffer,
                                        (int)(w + 0.5), (int)(h + 0.5));
         wlr_scene_node_set_position(&view->content_buffer->node,
-                                    (a->w - w) / 2.0, (a->h - h) / 2.0);
+                                    d->border * bs, d->title_h * bs);
         wlr_scene_buffer_set_opacity(view->content_buffer, (float)op);
     }
 
-    bool genie = view->tform_kind == TFORM_GENIE_IN ||
-        view->tform_kind == TFORM_GENIE_OUT;
-    const struct design_config *d = &view->server->design;
-    /* Эталон масштаба кнопок: полный размер окна. Для GENIE_IN это a
-     * (стартуем большими), для GENIE_OUT — b (приходим к большим);
-     * иначе при разворачивании из дока bs рос до full/min и кнопки
-     * раздувались к концу анимации. */
-    double ref_cw = view->tform_kind == TFORM_GENIE_OUT ? b->cw : a->cw;
-    double bs = genie && ref_cw > 1 ? (cw / ref_cw) : 1.0;
-    double bx0 = (a->cw - cw) / 2.0 + view_btn_x(view, 0) * bs;
-    double by0 = (a->ch - ch) / 2.0 + view_btn_y(view) * bs;
+    double bx0 = (d->border + BTN_X) * bs;
+    double by0 = (d->title_h - d->btn_size) / 2.0 * bs;
     for (int i = 0; i < 3; i++) {
         if (view->btns[i].node == NULL) {
             continue;
@@ -488,24 +519,18 @@ void effects_tform_apply(struct mywm_view *view) {
         wlr_scene_buffer_set_opacity(view->btns[i].node, (float)op);
     }
 
-    /* Заголовок следует за трансформацией (масштаб только у genie). */
     if (genie) {
-        view_title_apply_anim(view, bs, (a->cw - cw) / 2.0,
-                              (a->ch - ch) / 2.0, (float)op);
+        view_title_apply_anim(view, bs, 0, 0, (float)op);
     } else {
         view_title_reset_anim(view, (float)op);
     }
 
-    /* Тень следует за окном с ПОСТОЯННЫМИ полями: расчёт от текущих
-     * анимированных cw/ch (умножение на k=cw/a->cw взорвало бы тень
-     * при genie-out, где k достигает полного/свёрнутого размера). */
-    if (view->shadow != NULL && a->cw > 1 && a->ch > 1) {
+    /* Тень следует за кадром с постоянными полями. */
+    if (view->shadow != NULL) {
         const int m = EFFECTS_SHADOW_MARGIN;
         int sdw = (int)(cw + 2 * m + 0.5);
         int sdh = (int)(ch + 2 * m + 0.5);
-        int sx = (int)((a->cw - sdw) / 2.0);
-        int sy = (int)((a->ch - sdh) / 2.0 + EFFECTS_SHADOW_BIAS * p);
-        effects_shadow_place(view, sx, sy, sdw, sdh, (float)op);
+        effects_shadow_place(view, -m, -m, sdw, sdh, (float)op);
     }
 }
 

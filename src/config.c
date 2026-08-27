@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/util/log.h>
+#include <math.h>
 #include <toml.h>
 
 /*
@@ -316,6 +317,14 @@ void config_shell_defaults(struct mywm_server *server) {
     server->shell_cfg.start = NULL;
 }
 
+/* Дефолты секций [input]: macOS-поведение тачпада. */
+void config_input_defaults(struct mywm_server *server) {
+    server->input_cfg.tap_to_click = true;
+    server->input_cfg.natural_scroll = true;
+    server->input_cfg.disable_while_typing = true;
+    server->input_cfg.accel_speed = 0.0;
+}
+
 /* --- [design]: единый источник цветов и метрик оболочки --- */
 
 static void design_defaults(struct design_config *d) {
@@ -378,6 +387,10 @@ static void design_defaults(struct design_config *d) {
     memcpy(d->dock_minimized, dock_min, sizeof(dock_min));
     memcpy(d->dock_sep, dock_sep, sizeof(dock_sep));
     memcpy(d->dock_dot, dock_dot, sizeof(dock_dot));
+
+    /* Скругление углов: macOS-стиль — скруглены и максимизированные. */
+    d->corner_radius = 12.0;
+    d->corner_radius_maximized = 12.0;
 }
 
 void config_design_defaults(struct mywm_server *server) {
@@ -484,6 +497,17 @@ static void parse_design_table(struct design_config *d, toml_table_t *tab) {
     parse_color_key(tab, "color_dock_minimized", d->dock_minimized);
     parse_color_key(tab, "color_dock_sep", d->dock_sep);
     parse_color_key(tab, "color_dock_dot", d->dock_dot);
+
+    /* Скругление углов (px), 0 — прямые. */
+    toml_datum_t radius = toml_double_in(tab, "corner_radius");
+    if (radius.ok) {
+        d->corner_radius = fmax(0.0, fmin(64.0, radius.u.d));
+    }
+    toml_datum_t radius_max = toml_double_in(tab, "corner_radius_maximized");
+    if (radius_max.ok) {
+        d->corner_radius_maximized =
+            fmax(0.0, fmin(64.0, radius_max.u.d));
+    }
 
     wlr_log(WLR_INFO, "config: design font='%s' border=%d title=%d btn=%d/%d "
             "menubar=%d dock=%d/%d/%d",
@@ -618,6 +642,34 @@ static void config_parse_shell(struct mywm_server *server,
             server->shell_cfg.start ? server->shell_cfg.start : "");
 }
 
+static void config_parse_input(struct mywm_server *server,
+                               toml_table_t *tab) {
+    toml_datum_t tap = toml_bool_in(tab, "tap_to_click");
+    if (tap.ok) {
+        server->input_cfg.tap_to_click = tap.u.b;
+    }
+    toml_datum_t natural = toml_bool_in(tab, "natural_scroll");
+    if (natural.ok) {
+        server->input_cfg.natural_scroll = natural.u.b;
+    }
+    toml_datum_t dwt = toml_bool_in(tab, "disable_while_typing");
+    if (dwt.ok) {
+        server->input_cfg.disable_while_typing = dwt.u.b;
+    }
+    toml_datum_t accel = toml_double_in(tab, "accel_speed");
+    if (accel.ok) {
+        double v = accel.u.d;
+        if (v < -1.0) v = -1.0;
+        if (v > 1.0) v = 1.0;
+        server->input_cfg.accel_speed = v;
+    }
+    wlr_log(WLR_INFO, "config: input tap=%d natural=%d dwt=%d accel=%.2f",
+            server->input_cfg.tap_to_click,
+            server->input_cfg.natural_scroll,
+            server->input_cfg.disable_while_typing,
+            server->input_cfg.accel_speed);
+}
+
 void config_load(struct mywm_server *server, const char *path) {
     if (path == NULL) {
         return;
@@ -689,6 +741,10 @@ void config_load(struct mywm_server *server, const char *path) {
     toml_table_t *shell = toml_table_in(root, "shell");
     if (shell != NULL) {
         config_parse_shell(server, shell);
+    }
+    toml_table_t *input = toml_table_in(root, "input");
+    if (input != NULL) {
+        config_parse_input(server, input);
     }
     toml_table_t *design = toml_table_in(root, "design");
     if (design != NULL) {

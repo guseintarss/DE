@@ -23,11 +23,18 @@ PanelWindow {
     // Плавающая капсула поверх окон; место снизу резервирует
     // ExclusionMode.Auto.
     WlrLayershell.layer: WlrLayer.Top
+    // Резерв под капсулу (56px) + зазор (8px). Режим Ignore с явной
+    // зоной: Auto резервирует ВСЮ высоту окна (140px — с запасом под
+    // лейблы), из-за чего максимизированные окна висели над капсулой.
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.exclusiveZone: 64
 
-    // Ввод принимает только капсула дока: прозрачный верхний пояс
-    // (зона лейбла) не должен перехватывать клики у окон под ним.
+    // Ввод принимает капсула дока + открытое меню (оно рисуется над
+    // капсулой; без включения в маску клики по пунктам проваливаются
+    // сквозь окно). Скрытое меню не даёт области ввода.
     mask: Region {
-        item: dockBg
+        Region { item: dockBg }
+        Region { item: contextMenu }
     }
 
     readonly property string iconFont: "SF Pro Display, Segoe UI, sans-serif"
@@ -48,6 +55,127 @@ PanelWindow {
             hoveredOwner = null;
             hoveredName = "";
         }
+    }
+
+    // === КОНТЕКСТНОЕ МЕНЮ (правый клик по иконке) ===
+    property var menuTarget: null // {name, appId, cmd, pinned, running, toplevel}
+    property real menuX: 0
+
+    function openMenu(target, centerX) {
+        menuTarget = target;
+        menuX = centerX;
+    }
+
+    function closeMenu() {
+        menuTarget = null;
+    }
+
+    // Закрыть все окна приложения (по appId)
+    function closeAllByAppId(appId) {
+        const ts = ToplevelManager.toplevels.values;
+        for (let i = 0; i < ts.length; i++) {
+            if (ts[i].appId === appId) {
+                ts[i].close();
+            }
+        }
+    }
+
+    // Плашка меню над иконкой; пункты зависят от пина/запущенности.
+    Rectangle {
+        id: contextMenu
+        visible: root.menuTarget !== null
+        opacity: visible ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 120 } }
+        z: 60 // над подложкой закрытия
+
+        readonly property var items: {
+            const t = root.menuTarget;
+            if (t === null) return [];
+            const list = [];
+            if (t.pinned) list.push("Запустить");
+            if (t.running) list.push("Закрыть");
+            return list;
+        }
+
+        readonly property real pillTop: parent.height - 64
+        width: Math.max(menuCol.implicitWidth + 16, 140)
+        height: menuCol.implicitHeight + 12
+        x: Math.max(8, Math.min(parent.width - width - 8, root.menuX - width / 2))
+        y: pillTop - height - 6
+        radius: 10
+        color: "#E61C1C1E"
+        border.color: "#33FFFFFF"
+        border.width: 1
+
+        Column {
+            id: menuCol
+            anchors.centerIn: parent
+            spacing: 2
+
+            Repeater {
+                model: contextMenu.items
+                delegate: Item {
+                    required property string modelData
+                    required property int index
+                    // Фиксированная ширина: ширина меню считается из
+                    // implicitWidth колонки — зависеть от неё нельзя
+                    // (цикл polish, меню пустое и раздутое).
+                    width: 128
+                    height: 24
+                    x: 6
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 6
+                        color: itemArea.containsMouse ? "#33FFFFFF" : "transparent"
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                    }
+                    Text {
+                        anchors.centerIn: parent
+                        text: parent.modelData
+                        color: "#FFFFFF"
+                        font.family: root.iconFont
+                        font.pixelSize: 12
+                    }
+                    MouseArea {
+                        id: itemArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            // ВАЖНО: действие — ДО closeMenu. closeMenu
+                            // обнуляет menuTarget, Repeater уничтожает
+                            // делегат, и контекст обработчика умирает —
+                            // любой доступ после закрытия бросает
+                            // ReferenceError (действие молча пропадает).
+                            const t = root.menuTarget;
+                            const action = modelData;
+                            if (t === null) return;
+                            if (action === "Запустить" && t.cmd) {
+                                root.launch(t.cmd);
+                            } else if (action === "Закрыть") {
+                                if (t.toplevel) {
+                                    t.toplevel.close();
+                                } else if (t.appId) {
+                                    root.closeAllByAppId(t.appId);
+                                }
+                            }
+                            root.closeMenu();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Невидимая подложка поверх дока на время меню: клик мимо пунктов
+    // закрывает меню, не задевая иконки.
+    MouseArea {
+        anchors.fill: parent
+        visible: root.menuTarget !== null
+        enabled: visible
+        z: 50
+        onClicked: root.closeMenu()
     }
 
     // Плашка с именем приложения над капсулой
@@ -147,6 +275,7 @@ PanelWindow {
         property bool isActive: false
         signal clicked()
         signal middleClicked()
+        signal rightClicked(real centerX)
 
         width: 56
         height: 56
@@ -205,13 +334,17 @@ PanelWindow {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-            // Имя показывается в общем лейбле НАД доком
+            acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+            // Имя показывается в общем лейбле НАД доком; координаты
+            // считаем В МОМЕНТ события: mapToItem в биндинге оценивается
+            // один раз при создании (геометрия ещё нулевая) — лейблы
+            // «слипались» слева.
             onHoveredChanged: {
                 if (containsMouse) {
                     const p = dockItemTemplate.mapToItem(
                         root.contentItem, dockItemTemplate.width / 2, 0);
-                    root.hoverLabel(dockItemTemplate, dockItemTemplate.appName, p.x);
+                    root.hoverLabel(dockItemTemplate, dockItemTemplate.appName,
+                                    p.x);
                 } else {
                     root.unhoverLabel(dockItemTemplate);
                 }
@@ -219,6 +352,10 @@ PanelWindow {
             onClicked: (mouse) => {
                 if (mouse.button === Qt.MiddleButton) {
                     dockItemTemplate.middleClicked();
+                } else if (mouse.button === Qt.RightButton) {
+                    dockItemTemplate.rightClicked(
+                        dockItemTemplate.mapToItem(
+                            root.contentItem, dockItemTemplate.width / 2, 0).x);
                 } else {
                     dockItemTemplate.clicked();
                 }
@@ -273,6 +410,12 @@ PanelWindow {
                     isRunning: root.isRunning(modelData.appId)
                     isActive: root.isActive(modelData.appId)
                     onClicked: root.launch(modelData.cmd)
+                    onRightClicked: (cx) => root.openMenu(
+                        { name: appName, appId: modelData.appId,
+                          cmd: modelData.cmd, pinned: true,
+                          running: root.isRunning(modelData.appId),
+                          toplevel: null },
+                        cx)
                 }
             }
 
@@ -301,6 +444,11 @@ PanelWindow {
                         }
                     }
                     onMiddleClicked: modelData.close()
+                    onRightClicked: (cx) => root.openMenu(
+                        { name: appName, appId: modelData.appId,
+                          cmd: null, pinned: false, running: true,
+                          toplevel: modelData },
+                        cx)
                 }
             }
         }

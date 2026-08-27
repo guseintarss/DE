@@ -185,6 +185,9 @@ struct mywm_server {
     struct wallpaper_config wallpaper_cfg;
     struct animations_config animations_cfg;
 
+    /* Ввод ([input] в config.toml): тачпад и ускорение. */
+    struct input_config input_cfg;
+
     /* Оболочка ([shell]): builtin=false отключает встроенные менюбар и
      * док (их место занимает внешняя оболочка через layer-shell). */
     struct shell_config shell_cfg;
@@ -284,6 +287,15 @@ struct mywm_server {
     struct wl_listener cursor_axis;
     struct wl_listener cursor_frame;
     struct wl_listener request_cursor;
+    /* Трёхпальцевый свайп по тачпаду — переключение рабочих столов. */
+    struct wl_listener cursor_swipe_begin;
+    struct wl_listener cursor_swipe_update;
+    struct wl_listener cursor_swipe_end;
+    /* Night light: применение LUT от wlr-gamma-control клиентов. */
+    struct wl_listener gamma_set_gamma;
+    bool ws_gesture_active;
+    bool ws_gesture_done;          /* свайп уже вызвал переключение */
+    double ws_gesture_dx;          /* накопленный горизонтальный сдвиг */
 };
 
 struct mywm_output {
@@ -380,6 +392,10 @@ struct mywm_view {
     enum mywm_tform_kind tform_kind;
     struct spring_anim tform_spr;
     struct tform_geo tform_a, tform_b;
+    /* Время трансформации (мс): прогресс = ease(elapsed/duration),
+     * вместо физической пружины — без перелёта геометрии. */
+    double tform_elapsed;
+    double tform_duration;
     /* Исходная геометрия до genie и позиция иконки дока (для обратного
      * движения). */
     struct tform_geo tform_home, tform_min_geo;
