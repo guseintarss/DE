@@ -1,0 +1,6 @@
+option(
+    'install_header',
+    type: 'boolean',
+    value: false,
+    description: 'Install json.hpp header',
+)

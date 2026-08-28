@@ -1,23 +1,27 @@
 # Оболочка DE: внешний UI поверх композитора
 
-Композитор поддерживает два режима оболочки (`[shell]` в `config.toml`):
+С момента миграции на Wayfire оболочка всегда внешняя: десктопные панели
+рисуются клиентами по `zwlr-layer-shell-v1`, список окон публикует сам
+wayfire через `wlr-foreign-toplevel-management-v1`. Встроенной оболочки
+(как в прежнем композиторе в `legacy/`) больше нет.
 
-- **`builtin = true`** — менюбар и док рисует сам композитор
-  (`src/bar.c`, `src/dock.c`).
-- **`builtin = false`** (текущий) — панель/док рисует внешний клиент
-  через `zwlr-layer-shell-v1`. Список окон публикуется через
-  `wlr-foreign-toplevel-management-v1`.
+- Автозапуск оболочки и обоев при старте сессии — в `config/wayfire.ini`,
+  секция `[autostart]` (`shell = qs -p @DE_ROOT@/ui/quickshell`,
+  `wallpaper = de-wallpaper`).
+- Клавиатурное переключение окон/фокус даёт wayfire (`[switcher]`,
+  `[fast-switcher]`), а не шелл.
+-` к процессу wayfire применяется foreign-toplevel протоколом.
 
-## Протоколы, добавленные в композитор
+## Протоколы
 
-| Протокол | Зачем |
-|---|---|
-| `zwlr-layer-shell-v1` | панели по краям экрана, эксклюзивные зоны (окна не залезают под бар), клавиатурный фокус для лаунчеров |
-| `wlr-foreign-toplevel-management-v1` | список окон, заголовки/app_id/состояния, управление (activate/close/min/max) |
-| `zxdg-output-manager` (wlroots) | имена/геометрия выходов; обязателен для waybar |
+| Протокол | Кто предоставляет | Зачем |
+|---|---|---|
+| `zwlr-layer-shell-v1` | wayfire | панели по краям экрана, эксклюзивные зоны (окна не залезают под бар), клавиатурный фокус для лаунчеров |
+| `wlr-foreign-toplevel-management-v1` | wayfire | список окон, заголовки/app_id/состояния, управление (activate/close/min/max) |
+| `zxdg-output-manager` (wlroots) | wayfire | имена/геометрия выходов; обязателен для waybar |
 
-Эксклюзивные зоны слоёв учитываются при максимизации/тайлинге окон
-(`shell_usable_box()` в `src/layer_shell.c`).
+Эксклюзивные зоны слоёв wayfire учитывает при максимизации/тайлинге окон
+из коробки (`[simple-tile]`, `[grid]`).
 
 ## Основная оболочка: QuickShell (`ui/quickshell/`)
 
@@ -40,9 +44,10 @@
 qs -p ui/quickshell        # или абсолютный путь
 ```
 
-Автозапуск: в `config.toml` указано `start = "qs -p ui/quickshell"` —
-композитор сам запускает оболочку при старте (после создания сокета,
-путь относителен каталогу запуска DE). Чтобы отключить — очистите `start`.
+Автозапуск: секция `[autostart]` в `config/wayfire.ini`:
+`shell = qs -p @DE_ROOT@/ui/quickshell` — wayfire запускает шелл при
+старте (путь подставляется `session/run-de.sh`). Чтобы отключить —
+очистите значение.
 
 Проверено живьём на headless-запуске DE: оба бара мапятся, окно
 alacritty появляется в доке, клики/закрытие работают через
@@ -66,13 +71,12 @@ waybar -c ui/waybar/config.jsonc -s ui/waybar/style.css
 
 ## AGSv2 (Astal) — план
 
-Требует те же два протокола, поддержка уже есть в композиторе.
+Требует те же два протокола; оба предоставляет wayfire.
 
 ## Отладка
 
-- Лог композитора: `[DEBUG] new layer surface: layer=N output=...`.
+- Лог сессии: `build/run/logs/wayfire.log`.
 - Логи шелла: `/run/user/$UID/quickshell/by-id/<id>/log.qslog`.
 - Если внешний клиент не видит баров — проверить, что глобалы
   `zwlr_layer_shell_v1` и `zwlr_foreign_toplevel_manager_v1`
-  присутствуют в реестре сессии.
-- Вернуть встроенную оболочку: `[shell] builtin = true` и перезапуск DE.
+  присутствуют в реестре сессии (`weston-debug`/`wayland-info`).

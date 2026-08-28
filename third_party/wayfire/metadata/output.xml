@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<wayfire>
+  <object name="output">
+    <category>General</category>
+    <option name="mode" type="output::mode">
+      <default>auto</default>
+    </option>
+    <option name="position" type="output::position">
+      <default>auto</default>
+    </option>
+    <option name="scale" type="double">
+      <default>1.0</default>
+      <min>0.1</min>
+    </option>
+    <option name="transform" type="string">
+      <default>normal</default>
+    </option>
+    <option name="vrr" type="bool">
+      <default>false</default>
+    </option>
+    <option name="hdr" type="bool">
+      <default>false</default>
+    </option>
+    <option name="depth" type="int">
+      <default>8</default>
+      <min>8</min>
+      <max>10</max>
+    </option>
+    <option name="icc_profile" type="string">
+      <default></default>
+    </option>
+  </object>
+</wayfire>

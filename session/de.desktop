@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=DE
+Comment=Desktop environment based on Wayfire
+Exec=@DE_ROOT@/session/run-de.sh
+Type=Application
+X-GNOME-Autostart-Phase=DisplayServer

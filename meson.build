@@ -1,45 +1,64 @@
-project('DE', 'c',
-  version: '0.1',
-  default_options: ['warning_level=3', 'c_std=gnu11'])
+project('DE', 'c', 'cpp',
+  version: '0.2',
+  license: 'MIT',
+  meson_version: '>=0.64.0',
+  default_options: [
+    'c_std=gnu11',
+    'cpp_std=c++17',
+    'warning_level=2',
+    'werror=false',
+  ])
 
-add_project_arguments('-DWLR_USE_UNSTABLE', language: 'c')
+# =============================================================================
+# Ядро DE: Wayfire (вендорен в third_party/, собирается из исходников).
+#
+# wayfire и его библиотеки (wf-config, wf-utils, wf-json, wf-touch) живут в
+# third_party/ и подключаются как subprojects (см. subprojects/*). Системные
+# пакеты не используются/не меняются: библиотеки уровня wayland, cairo, glm,
+# yyjson и т.п. берутся уже установленными, а сам wayfire компилируется здесь.
+#
+# Полный стек ставится командой `meson install -C build` (бинарь, плагины,
+# metadata XML). Для запуска из исходников смотри session/run-de.sh.
+# =============================================================================
+
+wayfire_sp = subproject('wayfire',
+  default_options: [
+    'use_system_wlroots=enabled',
+    'use_system_wfconfig=disabled',
+    'xwayland=enabled',
+    'enable_gles32=true',
+    'tests=disabled',
+    'build_locales=disabled',
+  ])
+
+# Собрать ядро композитора без установки: `meson compile -C build wayfire`
+# (полный стек, включая плагины и metadata, ставится `meson install -C build`).
+
+# =============================================================================
+# Обои: маленький Wayland-клиент (слой background через wlr-layer-shell).
+# Заменяет wallpaper.c старого композитора: статические обои как отдельный
+# процесс поверх wayfire, без внешних инструментов (swaybg и т.п.).
+# =============================================================================
 
 wayland_scanner = find_program('wayland-scanner')
+
+layer_shell_proto = custom_target('wlr-layer-shell-client-protocol',
+  input: 'third_party/protocols/wlr-layer-shell-unstable-v1.xml',
+  output: 'wlr-layer-shell-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+
+layer_shell_code = custom_target('wlr-layer-shell-client-code',
+  input: 'third_party/protocols/wlr-layer-shell-unstable-v1.xml',
+  output: 'wlr-layer-shell-unstable-v1-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
 wayland_protocols_dir = dependency('wayland-protocols').get_variable('pkgdatadir')
 
-xdg_shell_proto = custom_target('xdg-shell-proto',
+# layer-shell ссылается на xdg-popup; нужен и его код (иначе undefined refs).
+xdg_shell_client = custom_target('xdg-shell-client-code',
   input: wayland_protocols_dir + '/stable/xdg-shell/xdg-shell.xml',
-  output: 'xdg-shell-protocol.h',
-  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@']
-)
-
-# wlr-layer-shell не входит в wayland-protocols — XML вендорится в
-# third_party/protocols (источник: репозиторий wlroots).
-layer_shell_proto = custom_target('layer-shell-proto',
-  input: 'third_party/protocols/wlr-layer-shell-unstable-v1.xml',
-  output: 'wlr-layer-shell-unstable-v1-protocol.h',
-  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@']
-)
-
-inc = include_directories('include', 'third_party/tomlc99', '.')
-
-deps = [
-  dependency('wayland-server'),
-  dependency('wayland-protocols'),
-  dependency('wlroots-0.20', version: '>=0.16.0'),
-  dependency('xkbcommon'),
-  dependency('libinput'),
-  dependency('pixman-1'),
-  dependency('libdrm'),
-  dependency('cairo'),
-  dependency('fontconfig'),
-]
-
-rsvg = dependency('librsvg-2.0', required: false)
-if rsvg.found()
-  deps += rsvg
-  add_project_arguments('-DHAVE_RSVG', language: 'c')
-endif
+  output: 'xdg-shell-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
 
 xxd = find_program('xxd')
 wallpaper_data = custom_target('wallpaper_data',
@@ -47,29 +66,36 @@ wallpaper_data = custom_target('wallpaper_data',
   output: 'wallpaper_data.c',
   command: [xxd, '-i', '-n', 'wallpaper_png', '@INPUT@', '@OUTPUT@'])
 
-executable('DE',
-  'src/main.c',
-  'src/server.c',
-  'src/cursor.c',
-  'src/keyboard.c',
-  'src/xdg_shell.c',
-  'src/wallpaper.c',
-  'src/config.c',
-  'src/design.c',
-  'src/dock.c',
-  'src/apps_menu.c',
-  'src/bar.c',
-  'src/layer_shell.c',
-  'src/foreign_toplevel.c',
-  'src/session_lock.c',
-  'src/workspace.c',
-  'src/animation.c',
-  'src/effects.c',
-  'src/icons.c',
-  'third_party/tomlc99/toml.c',
-  wallpaper_data,
-  xdg_shell_proto,
+de_wallpaper = executable('de-wallpaper',
+  'src/de-wallpaper.c',
   layer_shell_proto,
-  include_directories: inc,
-  dependencies: deps,
-  install: true)
+  layer_shell_code,
+  xdg_shell_client,
+  wallpaper_data,
+  dependencies: [
+    dependency('wayland-client'),
+    dependency('cairo'),
+  ],
+  include_directories: include_directories('include'),
+  install: true,
+  install_dir: get_option('bindir'),
+)
+
+# =============================================================================
+# Конфиг и сессия.
+# =============================================================================
+
+install_data('config/wayfire.ini',
+  install_dir: get_option('datadir') / 'de')
+
+install_data('session/run-de.sh',
+  install_dir: get_option('bindir'),
+  install_mode: 'rwxr-xr-x')
+
+de_session = configure_file(
+  input: 'session/de.desktop',
+  output: 'de.desktop',
+  configuration: {'DE_ROOT': meson.global_source_root()},
+)
+install_data(de_session,
+  install_dir: get_option('datadir') / 'wayland-sessions')
