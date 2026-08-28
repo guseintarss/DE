@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls.Basic
+import Qt5Compat.GraphicalEffects
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -16,49 +17,44 @@ PanelWindow {
         left: true
         right: true
     }
-    implicitHeight: 36 // Чуть выше для "воздуха", как в macOS
+    implicitHeight: 36
     color: "transparent"
     exclusionMode: ExclusionMode.Auto
 
-    // Шрифты: SF Pro для текста, Nerd Font для иконок
     readonly property string uiFont: "SF Pro Display, Segoe UI, Cantarell, sans-serif"
     readonly property string iconFont: "MesloLGLDZ Nerd Font, Material Design Icons, sans-serif"
 
-    // === РАБОЧИЕ СТОЛЫ (Spaces): состояние из композитора ===
-    // Файл $XDG_RUNTIME_DIR/de/workspaces: "current count" (1-based).
     property int wsCurrent: 1
     property int wsCount: 1
+    
+    // Состояние меню Apple
+    property bool appleMenuOpen: false
 
-    // === СТЕКЛЯННЫЙ ФОН МЕНЮБАРА ===
     Rectangle {
         anchors.fill: parent
-        // Темное стекло (для светлой темы замените на "#B3FFFFFF" и border на "#33000000")
-        color: '#0bd6d6d8' 
+        color: '#00d6d6d8' 
         border.color: '#00e9e9e9'
         border.width: 1
         
-        // Основной макет
         RowLayout {
             anchors.fill: parent
             anchors.leftMargin: 12
             anchors.rightMargin: 12
             spacing: 0
 
-            // ==========================================
-            // ЛЕВАЯ СЕКЦИЯ: Меню
-            // ==========================================
             RowLayout {
                 Layout.fillHeight: true
                 Layout.alignment: Qt.AlignVCenter
                 spacing: 4
 
-                // Кнопка Apple / Лаунчер
+                // === КНОПКА APPLE С POWER MENU ===
                 MenuButton {
-                    glyph: "" // Unicode логотип Apple (работает в Nerd Font)
-                    onClicked: ShellState.toggleLauncher()
+                    id: appleButton
+                    glyph: "\uF8FF" // логотип Apple (Material Design Icons)
+                    active: root.appleMenuOpen
+                    onClicked: root.appleMenuOpen = !root.appleMenuOpen
                 }
 
-                // Разделитель (тонкая вертикальная черта)
                 Rectangle {
                     Layout.fillHeight: true
                     Layout.preferredWidth: 1
@@ -66,11 +62,9 @@ PanelWindow {
                     color: "#33FFFFFF"
                 }
 
-                // Пункты меню
                 Repeater {
                     model: ["File", "Edit", "View", "Help"]
                     delegate: MenuButton {
-                        Component.onCompleted: console.log("TEMP btn:", modelData, "label:", label, "w:", width) // TEMP
                         label: modelData
                         active: ShellState.barPopup === "menu" &&
                                 ShellState.barMenuName === modelData
@@ -78,18 +72,14 @@ PanelWindow {
                     }
                 }
                 
-                // Растягиваем левую часть, чтобы центр был ровно посередине
                 Item { Layout.fillWidth: true }
             }
 
-            // ==========================================
-            // ЦЕНТР: Активное приложение
-            // ==========================================
             Text {
                 Layout.alignment: Qt.AlignVCenter | Qt.AlignHCenter
                 font.family: root.uiFont
                 font.pixelSize: 14
-                font.weight: Font.Medium // Полужирный, как в macOS
+                font.weight: Font.Medium
                 color: "#FFFFFF"
                 text: {
                     const active = ToplevelManager.activeToplevel;
@@ -97,25 +87,17 @@ PanelWindow {
                 }
                 elide: Text.ElideMiddle
                 Layout.maximumWidth: 400
-                
-                // Плавное изменение прозрачности при смене окна
                 opacity: 0.9
                 Behavior on opacity { NumberAnimation { duration: 200 } }
             }
 
-            // Растягиваем центр, чтобы правая часть прижалась вправо
             Item { Layout.fillWidth: true }
 
-            // ==========================================
-            // ПРАВАЯ СЕКЦИЯ: Статус
-            // ==========================================
             RowLayout {
                 Layout.fillHeight: true
                 Layout.alignment: Qt.AlignVCenter
                 spacing: 16
 
-                // --- Рабочие столы (Spaces) ---
-                // Точки-индикаторы: клик переключает стол через FIFO.
                 Row {
                     spacing: 7
                     Layout.alignment: Qt.AlignVCenter
@@ -152,7 +134,6 @@ PanelWindow {
                     }
                 }
 
-                // --- Громкость ---
                 Item {
                     Layout.fillHeight: true
                     implicitWidth: volInner.implicitWidth
@@ -177,7 +158,6 @@ PanelWindow {
                             text: volumeProc.label
                         }
                     }
-                    // Клик открывает центр управления
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
@@ -185,7 +165,6 @@ PanelWindow {
                     }
                 }
 
-                // --- Батарея ---
                 Item {
                     Layout.fillHeight: true
                     implicitWidth: batInner.implicitWidth
@@ -200,7 +179,6 @@ PanelWindow {
                             font.family: root.iconFont
                             font.pixelSize: 14
                             color: "#FFFFFF"
-                            // Динамическая иконка батареи: зарядка/уровни
                             text: {
                                 const d = UPower.displayDevice;
                                 if (d === null) return "";
@@ -222,7 +200,6 @@ PanelWindow {
                                   ? Math.round(UPower.displayDevice.percentage) + "%" : ""
                         }
                     }
-                    // Клик открывает центр управления
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
@@ -230,7 +207,6 @@ PanelWindow {
                     }
                 }
 
-                // --- Системный трей ---
                 RowLayout {
                     spacing: 8
                     Repeater {
@@ -260,7 +236,6 @@ PanelWindow {
                     }
                 }
 
-                // --- Часы ---
                 Text {
                     font.family: root.uiFont
                     font.pixelSize: 13
@@ -268,7 +243,6 @@ PanelWindow {
                     color: "#FFFFFF"
                     text: Qt.formatDateTime(clock.date, "ddd, d MMM  HH:mm")
 
-                    // Клик по часам — центр управления (календарь)
                     MouseArea {
                         anchors.fill: parent
                         anchors.margins: -6
@@ -283,25 +257,123 @@ PanelWindow {
                 }
             }
         }
+
+        // === POWER MENU (Выпадает под кнопкой Apple) ===
+        MouseArea {
+            id: powerMenuOverlay
+            anchors.fill: parent
+            visible: root.appleMenuOpen
+            z: 999
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            onClicked: root.appleMenuOpen = false
+        }
+
+        Rectangle {
+            id: powerMenu
+            visible: root.appleMenuOpen
+            z: 1000
+            x: 12 // Позиция под кнопкой Apple (с учетом левого отступа)
+            y: root.height + 4 // 4px отступ вниз от топбара
+            width: 200
+            height: powerMenuColumn.height + 16
+            radius: 12
+            color: "#E61C1C1E"
+            border.color: "#44FFFFFF"
+            border.width: 1
+
+            layer.enabled: true
+            layer.effect: DropShadow {
+                transparentBorder: true
+                horizontalOffset: 0
+                verticalOffset: 8
+                radius: 16
+                samples: 20
+                color: "#88000000"
+            }
+
+            Column {
+                id: powerMenuColumn
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 4
+
+                Repeater {
+                    model: [
+                        { text: " Sleep", action: "sleep", icon: "" },
+                        { text: "separator" },
+                        { text: " Restart", action: "restart", icon: "" },
+                        { text: " Shutdown", action: "shutdown", icon: "" },
+                        { text: "separator" },
+                        { text: " Log Out", action: "logout", icon: "" }
+                    ]
+                    delegate: Item {
+                        width: parent.width
+                        height: modelData === "separator" ? 1 : 36
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 8
+                            color: (modelData !== "separator" && powerMenuArea.containsMouse) ? "#33FFFFFF" : "transparent"
+                            Behavior on color { ColorAnimation { duration: 150; easing.type: Easing.OutQuad } }
+                            visible: modelData !== "separator"
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: "#33FFFFFF"
+                            visible: modelData === "separator"
+                        }
+
+                        Row {
+                            anchors.centerIn: parent
+                            spacing: 8
+                            visible: modelData !== "separator"
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: modelData.icon
+                                font.family: root.iconFont
+                                font.pixelSize: 14
+                                color: "#FFFFFF"
+                            }
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: modelData.text
+                                color: "#FFFFFF"
+                                font.family: root.uiFont
+                                font.pixelSize: 13
+                                font.weight: Font.Medium
+                            }
+                        }
+
+                        MouseArea {
+                            id: powerMenuArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            visible: modelData !== "separator"
+                            onClicked: {
+                                root.executePowerAction(modelData.action);
+                                root.appleMenuOpen = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    // ==========================================
-    // КОМПОНЕНТЫ
-    // ==========================================
-
-    // Премиальная кнопка меню с плавным ховером
     component MenuButton: Item {
         id: btn
         property string glyph: ""
         property string label: ""
-        // Меню открыто (кнопка «залипает» подсветкой)
         property bool active: false
         signal clicked()
 
         Layout.fillHeight: true
         Layout.preferredWidth: Math.max(labelText.implicitWidth, glyphText.implicitWidth) + 16
 
-        // Фон с анимацией
         Rectangle {
             anchors.fill: parent
             anchors.margins: 4
@@ -341,9 +413,6 @@ PanelWindow {
         }
     }
 
-    // ==========================================
-    // ЛОГИКА ГРОМКОСТИ (Оптимизированная)
-    // ==========================================
     Process {
         id: volumeProc
         property string label: ""
@@ -360,14 +429,11 @@ PanelWindow {
                 const m = s.match(/([\d.]+)\s*$/);
                 const v = m ? Math.round(parseFloat(m[1]) * 100) : 0;
                 
-                // Показываем громкость только если она не 0 и не замьючена, 
-                // или можно показывать всегда. Оставим всегда для стабильности UI.
                 volumeProc.label = volumeProc.muted ? "Muted" : v + "%";
             }
         }
     }
 
-    // Обновляем громкость раз в 2 секунды (чаще не нужно)
     Timer {
         interval: 2000
         repeat: true
@@ -376,9 +442,6 @@ PanelWindow {
         onTriggered: volumeProc.running = true
     }
 
-    // ==========================================
-    // РАБОЧИЕ СТОЛЫ: IPC с композитором
-    // ==========================================
     FileView {
         id: wsStateFile
         path: Quickshell.env("XDG_RUNTIME_DIR") + "/de/workspaces"
@@ -397,8 +460,6 @@ PanelWindow {
 
     Process {
         id: wsCmdProc
-        // Запись в FIFO композитора; читатель (DE) открыт всегда —
-        // запись не блокируется.
         command: ["sh", "-c",
                   "printf '%s\\n' 1 > \"$XDG_RUNTIME_DIR/de/ws-cmd\""]
     }
@@ -407,5 +468,44 @@ PanelWindow {
         wsCmdProc.command = ["sh", "-c",
             "printf '%s\\n' " + n + " > \"$XDG_RUNTIME_DIR/de/ws-cmd\""];
         wsCmdProc.running = true;
+    }
+
+    // === ФУНКЦИЯ ВЫПОЛНЕНИЯ POWER КОМАНД ===
+    function executePowerAction(action) {
+        console.log("Power action:", action);
+
+        // Бинарные служебные команды запускаем напрямую через execDetached:
+        // systemctl управляет питанием, loginctl — выходом из сессии.
+        let args = [];
+
+        switch(action) {
+            case "sleep":
+                args = ["systemctl", "suspend"];
+                break;
+            case "restart":
+                args = ["systemctl", "reboot"];
+                break;
+            case "shutdown":
+                args = ["systemctl", "poweroff"];
+                break;
+            case "logout":
+                // Выход из сессии через loginctl (терминирует пользовательскую
+                // сессию по $XDG_SESSION_ID). Работает в большинстве DE/WM.
+                args = ["loginctl", "terminate-session", Quickshell.env("XDG_SESSION_ID") || ""];
+                break;
+        }
+
+        if (args.length > 0) {
+            if (args[args.length - 1] === "") {
+                // Нет XDG_SESSION_ID — используем kill на наш собственный PID:
+                // завершение сессии эквивалентно выходу из shell.
+                args = ["loginctl", "terminate-user", Quickshell.env("USER") || ""];
+            }
+            try {
+                Quickshell.execDetached(args);
+            } catch (e) {
+                console.warn("Power action failed:", e);
+            }
+        }
     }
 }
