@@ -26,9 +26,6 @@ PanelWindow {
 
     property int wsCurrent: 1
     property int wsCount: 1
-    
-    // Состояние меню Apple
-    property bool appleMenuOpen: false
 
     Rectangle {
         anchors.fill: parent
@@ -47,12 +44,20 @@ PanelWindow {
                 Layout.alignment: Qt.AlignVCenter
                 spacing: 4
 
-                // === КНОПКА APPLE С POWER MENU ===
+                // === КНОПКА APPLE: ЛКМ = лаунчер, ПКМ = power-меню (окно PowerMenu) ===
                 MenuButton {
                     id: appleButton
                     glyph: "\uF8FF" // логотип Apple (Material Design Icons)
-                    active: root.appleMenuOpen
-                    onClicked: root.appleMenuOpen = !root.appleMenuOpen
+                    active: ShellState.appleMenuOpen || ShellState.launcherOpen
+                    onClicked: {
+                        // ЛКМ — выпадающее меню (лаунчер приложений).
+                        ShellState.closePowerMenu();
+                        ShellState.toggleLauncher();
+                    }
+                    onRightClicked: {
+                        // ПКМ — меню питания (Sleep/Restart/Shutdown/Log Out).
+                        ShellState.openPowerMenu();
+                    }
                 }
 
                 Rectangle {
@@ -258,111 +263,7 @@ PanelWindow {
             }
         }
 
-        // === POWER MENU (Выпадает под кнопкой Apple) ===
-        MouseArea {
-            id: powerMenuOverlay
-            anchors.fill: parent
-            visible: root.appleMenuOpen
-            z: 999
-            acceptedButtons: Qt.LeftButton | Qt.RightButton
-            onClicked: root.appleMenuOpen = false
         }
-
-        Rectangle {
-            id: powerMenu
-            visible: root.appleMenuOpen
-            z: 1000
-            x: 12 // Позиция под кнопкой Apple (с учетом левого отступа)
-            y: root.height + 4 // 4px отступ вниз от топбара
-            width: 200
-            height: powerMenuColumn.height + 16
-            radius: 12
-            color: "#E61C1C1E"
-            border.color: "#44FFFFFF"
-            border.width: 1
-
-            layer.enabled: true
-            layer.effect: DropShadow {
-                transparentBorder: true
-                horizontalOffset: 0
-                verticalOffset: 8
-                radius: 16
-                samples: 20
-                color: "#88000000"
-            }
-
-            Column {
-                id: powerMenuColumn
-                anchors.fill: parent
-                anchors.margins: 8
-                spacing: 4
-
-                Repeater {
-                    model: [
-                        { text: " Sleep", action: "sleep", icon: "" },
-                        { text: "separator" },
-                        { text: " Restart", action: "restart", icon: "" },
-                        { text: " Shutdown", action: "shutdown", icon: "" },
-                        { text: "separator" },
-                        { text: " Log Out", action: "logout", icon: "" }
-                    ]
-                    delegate: Item {
-                        width: parent.width
-                        height: modelData === "separator" ? 1 : 36
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 8
-                            color: (modelData !== "separator" && powerMenuArea.containsMouse) ? "#33FFFFFF" : "transparent"
-                            Behavior on color { ColorAnimation { duration: 150; easing.type: Easing.OutQuad } }
-                            visible: modelData !== "separator"
-                        }
-
-                        Rectangle {
-                            anchors.fill: parent
-                            color: "#33FFFFFF"
-                            visible: modelData === "separator"
-                        }
-
-                        Row {
-                            anchors.centerIn: parent
-                            spacing: 8
-                            visible: modelData !== "separator"
-
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: modelData.icon
-                                font.family: root.iconFont
-                                font.pixelSize: 14
-                                color: "#FFFFFF"
-                            }
-
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: modelData.text
-                                color: "#FFFFFF"
-                                font.family: root.uiFont
-                                font.pixelSize: 13
-                                font.weight: Font.Medium
-                            }
-                        }
-
-                        MouseArea {
-                            id: powerMenuArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            visible: modelData !== "separator"
-                            onClicked: {
-                                root.executePowerAction(modelData.action);
-                                root.appleMenuOpen = false;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     component MenuButton: Item {
         id: btn
@@ -370,6 +271,7 @@ PanelWindow {
         property string label: ""
         property bool active: false
         signal clicked()
+        signal rightClicked()
 
         Layout.fillHeight: true
         Layout.preferredWidth: Math.max(labelText.implicitWidth, glyphText.implicitWidth) + 16
@@ -408,8 +310,12 @@ PanelWindow {
             id: btnArea
             anchors.fill: parent
             hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
             cursorShape: Qt.PointingHandCursor
-            onClicked: btn.clicked()
+            onClicked: (mouse) => {
+                if (mouse.button === Qt.RightButton) btn.rightClicked();
+                else btn.clicked();
+            }
         }
     }
 
@@ -468,44 +374,5 @@ PanelWindow {
         wsCmdProc.command = ["sh", "-c",
             "printf '%s\\n' " + n + " > \"$XDG_RUNTIME_DIR/de/ws-cmd\""];
         wsCmdProc.running = true;
-    }
-
-    // === ФУНКЦИЯ ВЫПОЛНЕНИЯ POWER КОМАНД ===
-    function executePowerAction(action) {
-        console.log("Power action:", action);
-
-        // Бинарные служебные команды запускаем напрямую через execDetached:
-        // systemctl управляет питанием, loginctl — выходом из сессии.
-        let args = [];
-
-        switch(action) {
-            case "sleep":
-                args = ["systemctl", "suspend"];
-                break;
-            case "restart":
-                args = ["systemctl", "reboot"];
-                break;
-            case "shutdown":
-                args = ["systemctl", "poweroff"];
-                break;
-            case "logout":
-                // Выход из сессии через loginctl (терминирует пользовательскую
-                // сессию по $XDG_SESSION_ID). Работает в большинстве DE/WM.
-                args = ["loginctl", "terminate-session", Quickshell.env("XDG_SESSION_ID") || ""];
-                break;
-        }
-
-        if (args.length > 0) {
-            if (args[args.length - 1] === "") {
-                // Нет XDG_SESSION_ID — используем kill на наш собственный PID:
-                // завершение сессии эквивалентно выходу из shell.
-                args = ["loginctl", "terminate-user", Quickshell.env("USER") || ""];
-            }
-            try {
-                Quickshell.execDetached(args);
-            } catch (e) {
-                console.warn("Power action failed:", e);
-            }
-        }
     }
 }

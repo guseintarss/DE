@@ -24,7 +24,7 @@ PanelWindow {
     visible: ShellState.barPopup === "cc"
     color: "transparent"
 
-    WlrLayershell.layer: WlrLayer.Top
+    WlrLayershell.layer: WlrLayer.Overlay
     exclusionMode: ExclusionMode.Ignore
 
     readonly property string uiFont: "SF Pro Display, Segoe UI, Cantarell, sans-serif"

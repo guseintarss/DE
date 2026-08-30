@@ -44,7 +44,8 @@ meson install -C build    # собирает и «ставит» весь сте
 - `meson compile -C build` — только обои (`de-wallpaper`);
 - `meson compile -C build wayfire` — только ядро композитора;
 - `meson install -C build` — полный стек: wayfire, плагины, metadata,
-  оболочку запуска, конфиг и .desktop-файлы сессии.
+  оболочку запуска, конфиг, .desktop-файлы сессии и икон-тему BigSur
+  (вендореная, собирается в `build/de/share/icons`).
 
 ## Запуск
 
@@ -77,14 +78,26 @@ meson install -C build    # собирает и «ставит» весь сте
 Анимации, цвета, размеры — в `config/wayfire.ini` (применяются на лету,
 wayfire перечитывает файл при изменении).
 
+## Иконки (Big Sur)
+
+В проекте вендорена macOS-икон-тема [BigSur](https://github.com/yeyushengfan258/BigSur-icon-theme).
+На `meson install` она собирается в `build/de/share/icons` (темы `BigSur`,
+`BigSur-dark` и hicolor-фолбек), `session/run-de.sh` подключает её через
+`XDG_DATA_DIRS` и ставит `QS_ICON_THEME=BigSur`. Док, лаунчер и системные
+иконки резолвятся через стандартный freedesktop-поиск (`QIcon::fromTheme`),
+поэтому даже приложения без иконки в теме (например, zen-browser — для него
+добавлен алиас) получают macOS-пиктограммы.
+
 ## Структура
 
 ```
 src/de-wallpaper.c   — клиент обоев (слой background, wlr-layer-shell)
 config/wayfire.ini   — конфигурация wayfire для DE
+scripts/             — вспомогательные скрипты (install-icons.sh)
 session/run-de.sh    — запуск сессии
 session/de.desktop   — запись для менеджера сессий
-third_party/         — вендорен: wayfire, wf-config, wf-utils, wf-json, wf-touch
+third_party/         — вендорен: wayfire, wf-config, wf-utils, wf-json, wf-touch,
+                       BigSur-icon-theme
 subprojects/         — симлинки на third_party/* (для meson)
 legacy/              — прежний композитор на wlroots (C), конфиг config.toml
 ui/quickshell        — оболочка QuickShell (менюбар, док, лаунчер)
@@ -99,6 +112,7 @@ ui/quickshell        — оболочка QuickShell (менюбар, док, л
 | wf-utils | `329c3ff` |
 | wf-json | `70039e1` |
 | wf-touch | `d7ae5e7` |
+| BigSur-icon-theme | `master` (срез 2026-08-29) |
 
 Обновление: заместить дерево в `third_party/<name>` на новую ревизию
 (симлинки в `subprojects/` остаются) и пересобрать.

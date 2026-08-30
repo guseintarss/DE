@@ -22,7 +22,7 @@ PanelWindow {
     visible: ShellState.barPopup === "menu"
     color: "transparent"
 
-    WlrLayershell.layer: WlrLayer.Top
+    WlrLayershell.layer: WlrLayer.Overlay
     exclusionMode: ExclusionMode.Ignore
 
     // Число столов — из файла состояния композитора

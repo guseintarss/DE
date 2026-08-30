@@ -33,7 +33,8 @@ wayfire через `wlr-foreign-toplevel-management-v1`. Встроенной о
 - `Dock.qml` — нижний док: лаунчер + иконки всех открытых окон
   (`ToplevelManager`); клик — фокус, средняя кнопка — закрыть, точка =
   сфокусированное окно. Иконки резолвятся из .desktop
-  (`DesktopEntries.heuristicLookup`).
+  (`DesktopEntries.heuristicLookup`) и рисуются из вендоренной икон-темы
+  BigSur (`build/de/share/icons`, `QS_ICON_THEME=BigSur` в run-de.sh).
 - `Launcher.qml` — встроенный лаунчер приложений (поиск по .desktop,
   Enter/клик — запуск; внешних wofi/rofi в системе нет).
 - `ShellState.qml` + `qmldir` — общее состояние (открыт ли лаунчер).

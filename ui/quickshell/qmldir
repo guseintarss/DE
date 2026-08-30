@@ -1,5 +1,6 @@
 singleton ShellState 1.0 ShellState.qml
 TopBar 1.0 TopBar.qml
+PowerMenu 1.0 PowerMenu.qml
 BarBackdrop 1.0 BarBackdrop.qml
 BarMenu 1.0 BarMenu.qml
 ControlCenter 1.0 ControlCenter.qml

@@ -46,6 +46,11 @@ export WAYFIRE_PLUGIN_PATH="$LIBWAYFIRE"
 export WAYFIRE_PLUGIN_XML_PATH="$PREFIX/share/wayfire/metadata"
 export XDG_DATA_DIRS="$PREFIX/share:${XDG_DATA_DIRS:-}"
 
+# Икон-тема BigSur (вендореная, собирается в $PREFIX/share/icons):
+# QuickShell читает QS_ICON_THEME -> QIcon::setThemeName(), так что док и
+# лаунчер резолвят macOS-иконки через стандартный freedesktop-поиск.
+export QS_ICON_THEME=BigSur
+
 # vendor-библиотеки (wf-config/wf-utils) приоритетнее системных.
 export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 

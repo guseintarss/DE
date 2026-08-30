@@ -99,3 +99,11 @@ de_session = configure_file(
 )
 install_data(de_session,
   install_dir: get_option('datadir') / 'wayland-sessions')
+
+# =============================================================================
+# Вендоренная икон-тема BigSur (third_party/BigSur-icon-theme).
+# Собирается install-скриптом в $PREFIX/share/icons на этапе
+# `meson install -C build`; XDG_DATA_DIRS подключает её в session/run-de.sh.
+# =============================================================================
+
+meson.add_install_script('scripts/install-icons.sh')

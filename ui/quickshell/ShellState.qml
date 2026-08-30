@@ -7,12 +7,29 @@ Singleton {
     id: root
     property bool launcherOpen: false
 
+    // Меню питания (ПКМ по кнопке Apple). Отдельное окно PowerMenu.
+    property bool appleMenuOpen: false
+
     function toggleLauncher() {
         root.launcherOpen = !root.launcherOpen;
+        if (root.launcherOpen) {
+            root.barPopup = "";
+            root.appleMenuOpen = false;
+        }
     }
 
     function closeLauncher() {
         root.launcherOpen = false;
+    }
+
+    function openPowerMenu() {
+        root.barPopup = "";
+        root.launcherOpen = false;
+        root.appleMenuOpen = true;
+    }
+
+    function closePowerMenu() {
+        root.appleMenuOpen = false;
     }
 
     // === Попапы верхней панели ===
@@ -22,6 +39,7 @@ Singleton {
     property string barMenuName: ""
 
     function toggleBarMenu(name) {
+        root.appleMenuOpen = false;
         if (root.barPopup === "menu" && root.barMenuName === name) {
             root.barPopup = "";
         } else {
@@ -31,6 +49,7 @@ Singleton {
     }
 
     function toggleCC() {
+        root.appleMenuOpen = false;
         root.barPopup = root.barPopup === "cc" ? "" : "cc";
     }
 

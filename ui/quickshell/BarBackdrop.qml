@@ -3,8 +3,9 @@ import Quickshell
 import Quickshell.Wayland
 
 // Невидимая подложка на время попапов верхней панели (меню/центр
-// управления): клик мимо закрывает. Регистрируется ПЕРВОЙ в shell.qml —
-// ниже TopBar и самих попапов, но выше обычных окон (слой Top).
+// управления/меню питания): клик мимо закрывает. Регистрируется ПЕРВОЙ
+// в shell.qml — ниже TopBar и самих попапов, но выше обычных окон
+// (слой Top).
 PanelWindow {
     anchors {
         left: true
@@ -12,7 +13,7 @@ PanelWindow {
         top: true
         bottom: true
     }
-    visible: ShellState.barPopup !== ""
+    visible: ShellState.barPopup !== "" || ShellState.appleMenuOpen
     color: "transparent"
 
     WlrLayershell.layer: WlrLayer.Top
@@ -20,6 +21,9 @@ PanelWindow {
 
     MouseArea {
         anchors.fill: parent
-        onClicked: ShellState.closeBarPopup()
+        onClicked: {
+            ShellState.closeBarPopup();
+            ShellState.closePowerMenu();
+        }
     }
 }
