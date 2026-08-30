@@ -92,6 +92,7 @@ wayfire перечитывает файл при изменении).
 
 ```
 src/de-wallpaper.c   — клиент обоев (слой background, wlr-layer-shell)
+src/de-workspace.c   — мост рабочих столов (FIFO ws-cmd → IPC wayfire)
 config/wayfire.ini   — конфигурация wayfire для DE
 scripts/             — вспомогательные скрипты (install-icons.sh)
 session/run-de.sh    — запуск сессии

@@ -37,8 +37,8 @@
 
 static char runtime_dir[PATH_MAX];
 static char de_dir[PATH_MAX];
-static char fifo_path[PATH_MAX];
-static char state_path[PATH_MAX];
+static char fifo_path[PATH_MAX + 32];
+static char state_path[PATH_MAX + 32];
 
 static void ensure_de_dir(const char *rt)
 {
@@ -221,8 +221,6 @@ static int json_find_int(const char *json, const char *key, int *out)
 static int parse_focused_state(const char *resp,
     int *out_id, int *cur_x, int *cur_y, int *grid_w, int *grid_h)
 {
-    /* get-focused-output возвращает {"result":"ok","info":{...}}
-     * нужные поля: info.id, info.workspace.x, info.workspace.grid_width ... */
     /*
      * get-focused-output возвращает {"result":"ok","info":{...}}.
      * Поля:
@@ -307,15 +305,15 @@ static int linear_to_grid(int n, int w, int h, int *x, int *y)
 }
 
 /* Переключает рабочий стол. Возвращает новый линейный индекс (1-based). */
-static int switch_workspace(int fd, const char *cmd, int current, int total)
+static int switch_workspace(int fd, const char *cmd, int current, int *total)
 {
     int n = 0;
     if (strcmp(cmd, "next") == 0)
     {
-        n = (current >= total) ? 1 : current + 1;
+        n = (current >= *total) ? 1 : current + 1;
     } else if (strcmp(cmd, "prev") == 0)
     {
-        n = (current <= 1) ? total : current - 1;
+        n = (current <= 1) ? *total : current - 1;
     } else
     {
         n = atoi(cmd);
@@ -326,27 +324,20 @@ static int switch_workspace(int fd, const char *cmd, int current, int total)
         return current;
     }
 
-    int out_id = 0, ox = 0, oy = 0;
-    int normal = 1; /* если не смогли получить фокус — рабочий стол 0 */
+    int out_id  = 0;
+    int grid_w  = 2, grid_h = 2;
+    int x = 0, y = 0;
 
-    int gx = 0, gy = 0, x = 0, y = 0;
-    int grid_w = 2, grid_h = 2;
-
-    if (get_focused(fd, &out_id, &ox, &oy, &grid_w, &grid_h) < 0)
+    if (get_focused(fd, &out_id, NULL, NULL, &grid_w, &grid_h) < 0)
     {
         return current;
     }
 
+    *total = grid_w * grid_h;
     if (linear_to_grid(n, grid_w, grid_h, &x, &y) < 0)
     {
         return current;
     }
-
-    /* корректно синхронизируем total по сетке */
-    int real_total = grid_w * grid_h;
-    (void)normal;
-    (void)gx;
-    (void)gy;
 
     char data[128];
     snprintf(data, sizeof data,
@@ -413,10 +404,10 @@ int main(int argc, char **argv)
                 int id = 0, cx = 0, cy = 0, gw = 2, gh = 2;
                 if (get_focused(ipc, &id, &cx, &cy, &gw, &gh) == 0)
                 {
-                    int t = gw * gh;
-                    if (t > 0)
+                    total = gw * gh;
+                    if (total < 1)
                     {
-                        total = t;
+                        total = 1;
                     }
 
                     current = cx + cy * gw + 1;
@@ -427,9 +418,6 @@ int main(int argc, char **argv)
 
                     write_state(current, total);
                 }
-            } else
-            {
-                write_state(current, total);
             }
         }
 
@@ -438,7 +426,7 @@ int main(int argc, char **argv)
         if (r > 0)
         {
             pos += (size_t)r;
-            size_t nl;
+            char *nl;
             while ((nl = memchr(line, '\n', pos)) != NULL)
             {
                 size_t clen = (size_t)(nl - line);
@@ -446,14 +434,8 @@ int main(int argc, char **argv)
 
                 if (ipc >= 0)
                 {
-                    int newcur = switch_workspace(ipc, line, current, total);
-                    int t = total;
-                    if (get_focused(ipc, NULL, NULL, NULL, NULL, NULL) == 0)
-                    {
-                        /* total не изменится; оставляем */
-                    }
-                    current = newcur;
-                    write_state(current, t);
+                    current = switch_workspace(ipc, line, current, &total);
+                    write_state(current, total);
                 }
 
                 memmove(line, nl + 1, pos - clen - 1);
@@ -466,16 +448,12 @@ int main(int argc, char **argv)
             nanosleep(&ts, NULL);
         } else if (r == 0)
         {
-            /* писатель закрыл FIFO: переоткроем */
+            /* писатель закрыл FIFO: переоткроем (напишущий откроет снова) */
             close(state_fd);
             state_fd = open(fifo_path, O_RDONLY | O_NONBLOCK);
             if (state_fd < 0)
             {
-                state_fd = open(fifo_path, O_RDONLY | O_NONBLOCK);
-                if (state_fd < 0)
-                {
-                    return 1;
-                }
+                return 1;
             }
         }
     }

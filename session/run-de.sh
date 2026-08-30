@@ -65,5 +65,10 @@ WF_LOG="$RUNDIR/logs/wayfire.log"
 # Сокет композитора поднимает сам wayfire; здесь просто гарантируем каталог.
 mkdir -p "${XDG_RUNTIME_DIR:-$RUNDIR}"
 
+# Рантайм-каталог моста рабочих столов (de-workspace создаёт FIFO ws-cmd и
+# файл состояния workspaces). Гарантируем заранее, чтобы QML и мост
+# использовали один и тот же путь.
+mkdir -p "${XDG_RUNTIME_DIR:-$RUNDIR}/de"
+
 echo "de: старт wayfire (конфиг: $CFG, лог: $WF_LOG)"
 exec "$WAYFIRE_BIN" "$@" >"$WF_LOG" 2>&1

@@ -39,6 +39,22 @@ wayfire через `wlr-foreign-toplevel-management-v1`. Встроенной о
   Enter/клик — запуск; внешних wofi/rofi в системе нет).
 - `ShellState.qml` + `qmldir` — общее состояние (открыт ли лаунчер).
 
+### Рабочие столы
+
+Точки рабочих столов в `TopBar.qml` и подменю «View» в `BarMenu.qml`
+переключают столы композитора. Оболочка не трогает wayfire напрямую: она
+пишет команду в FIFO `$XDG_RUNTIME_DIR/de/ws-cmd` (`1..N`, `next`, `prev`) и
+читает текущее состояние из `$XDG_RUNTIME_DIR/de/workspaces`
+(`"<текущий> <всего>"`). Потребитель — демон `de-workspace`
+(`src/de-workspace.c`), который:
+
+- создаёт `$XDG_RUNTIME_DIR/de/`, FIFO `ws-cmd` и файл состояния;
+- переключает стол по IPC-методу wayfire `vswitch/set-workspace`;
+- всегда держит `workspaces` актуальным (сетка 2×2 = 4 стола).
+
+`de-workspace` автозапускается wayfire (секция `[autostart]` в
+`config/wayfire.ini`) и наследует `WAYFIRE_SOCKET` от композитора.
+
 Запуск внутри сессии DE:
 
 ```bash
